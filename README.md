@@ -20,3 +20,13 @@ sudo apt install python3-pip
 sudo pip3 install -U jetson-stats
 jtop
 ```
+
+Docker
+```
+sudo groupadd docker
+sudo usermod -aG docker $USER
+newgrp docker
+docker run hello-world
+# 'reboot' if necessary
+```
+
