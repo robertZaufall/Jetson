@@ -8,6 +8,14 @@ sudo apt update && sudo apt upgrade
 sudo apt install iwlwifi-modules
 ```
 
+### Exfat
+```
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install exfatprogs
+# sudo apt install exfat-fuse
+```
+
 ### Install tools  
 Basic tools  
 ```
