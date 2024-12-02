@@ -39,7 +39,7 @@ jtop
 sudo apt install xrdp
 ```
 
-Docker
+### Docker
 ```
 sudo groupadd docker
 sudo usermod -aG docker $USER
@@ -48,7 +48,19 @@ docker run hello-world
 # 'reboot' if necessary
 ```
 
-Nvidia Isaac
+### Share folder in Filemanager
+Share folder via UI.  
+
+### Setup remote SSH
+Local device  
+```
+ssh-keygen
+```
+
+Install VS Code Remote-SSH extension
+Connect to Ubuntu.
+
+### Nvidia Isaac
 ```
 sudo apt-get install git-lfs
 git lfs install --skip-repo
