@@ -60,6 +60,23 @@ ssh-keygen
 Install VS Code Remote-SSH extension
 Connect to Ubuntu.
 
+### OpenCV
+https://qengineering.eu/install-opencv-on-orin-nano.html
+```
+wget https://github.com/Qengineering/Install-OpenCV-Jetson-Nano/raw/main/OpenCV-4-10-0.sh
+sudo chmod 755 ./OpenCV-4-10-0.sh
+./OpenCV-4-10-0.sh
+
+# cleanup
+rm OpenCV-4-10-0.sh
+sudo rm -rf ~/opencv
+sudo rm -rf ~/opencv_contrib
+```
+check it with jtop
+```
+jtop
+```
+
 ### Nvidia Isaac
 ```
 sudo apt-get install git-lfs
@@ -138,6 +155,7 @@ mkdir -p ~/workspaces/isaac_ros-dev/src
 cd ~/workspaces/isaac_ros-dev/src
 git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common
 git clone https://github.com/orbbec/OrbbecSDK_ROS2.git
+# git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam # compilation does nor work
 cd ..
 ```
 
