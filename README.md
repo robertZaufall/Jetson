@@ -143,19 +143,14 @@ docker pull nvcr.io/nvidia/l4t-base:r35.2.1
 
 ```
 sudo apt install libgtk-3-dev
-cd /usr/src/jetson_multimedia_api/argus/cmake/
-sudo cmake ..
-sudo make install
-argus_syncstereo # error
 ```
 
-Next try:
+Git repos as basis:
 ```
 mkdir -p ~/workspaces/isaac_ros-dev/src
 cd ~/workspaces/isaac_ros-dev/src
 git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common
 git clone https://github.com/orbbec/OrbbecSDK_ROS2.git
-# git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam # compilation does nor work
 cd ..
 ```
 
@@ -169,9 +164,11 @@ RUN apt-get update && apt-get install -y \
     ros-humble-cv-bridge \
     ros-humble-image-transport \
     ros-humble-image-pipeline \
+    ros-humble-image-publisher \
     ros-humble-vision-msgs \
     udev \
     libusb-1.0-0 \
+    libopenni2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create workspace directory
@@ -180,15 +177,17 @@ WORKDIR /workspace
 # Copy the entire src directory
 COPY src/ src/
 
-# Build ROS workspace
-WORKDIR /workspace
-RUN . /opt/ros/humble/setup.sh \
-    && colcon build --symlink-install
+# Copy udev rules
+RUN ./src/OrbbecSDK_ROS2/orbbec_camera/scripts/install_udev_rules.sh
+
+# Build workspace
+RUN . /opt/ros/humble/setup.sh && colcon build --symlink-install
 
 # Source setup in bashrc
 RUN echo "source /workspace/install/setup.bash" >> /root/.bashrc
 
 WORKDIR /workspace
+
 EOF
 ```
 
@@ -232,6 +231,9 @@ sudo docker build -t isaac_ros_orbbec .
 
 
 ```
+ros2 launch orbbec_camera astra.launch.py \
+    color_width:=640 color_height:=480 color_fps:=30 color_format:=RGB888 \
+    depth_width:=640 depth_height:=480 depth_fps:=30 depth_format:=Y11
 ```
 
 
