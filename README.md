@@ -60,6 +60,23 @@ ssh-keygen
 Install VS Code Remote-SSH extension
 Connect to Ubuntu.
 
+### Jetson containers / Ollama
+https://github.com/dusty-nv/jetson-containers/tree/master
+```
+# install the container tools
+git clone https://github.com/dusty-nv/jetson-containers
+bash jetson-containers/install.sh
+```
+https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/ollama
+```
+# models cached under jetson-containers/data
+jetson-containers run --name ollama $(autotag ollama)
+/bin/ollama run mistral
+
+# Open-WbeUI Client
+docker run -it --rm --network=host --add-host=host.docker.internal:host-gateway ghcr.io/open-webui/open-webui:main
+```
+
 ### OpenCV
 https://qengineering.eu/install-opencv-on-orin-nano.html
 ```
