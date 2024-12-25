@@ -39,6 +39,16 @@ jtop
 sudo apt install xrdp
 ```
 
+### Swapfile
+```
+sudo systemctl disable nvzramconfig
+sudo fallocate -l 16G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap ssw 0 0' | sudo tee -a /etc/fstab
+```
+
 ### Docker
 ```
 sudo groupadd docker
