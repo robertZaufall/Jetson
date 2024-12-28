@@ -32,22 +32,23 @@ jtop
 ### Remote, login
 - auto login (user)
 - power settings: don't switch off screen
-- delete keyring password (app
-- enable remote desktop sharing, vnc
-- install xrdp
+- delete keyring password (app)
+- enable remote desktop sharing, vnc (optional)
+- install xrdp (optional)
 ```
 sudo apt install xrdp
 ```
 
 ### Swapfile
 https://www.jetson-ai-lab.com/tips_ram-optimization.html  
+
 ```
 sudo systemctl disable nvzramconfig
-sudo fallocate -l 16G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-echo '/swapfile none swap ssw 0 0' | sudo tee -a /etc/fstab
+sudo fallocate -l 16G /mnt/16GB.swap
+sudo chmod 600 /mnt/16GB.swap
+sudo mkswap /mnt/16GB.swap
+sudo swapon /mnt/16GB.swap
+echo '/mnt/16GB.swap none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 ### Docker
@@ -71,22 +72,28 @@ ssh-keygen
 Install VS Code Remote-SSH extension
 Connect to Ubuntu.
 
-### Jetson containers / Ollama
-https://github.com/dusty-nv/jetson-containers/tree/master
+### Jetson containers
+https://github.com/dusty-nv/jetson-containers  
 ```
 # install the container tools
 git clone https://github.com/dusty-nv/jetson-containers
 bash jetson-containers/install.sh
 ```
+Local directory get's connected with `jetson-containers`.
+Dependecies can be edited in the Dockerfile comments. Versions can be added to `config.py` files.
+
+#### Ollama
 https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/ollama
 ```
 # models cached under jetson-containers/data
 jetson-containers run --name ollama $(autotag ollama)
 /bin/ollama run mistral
 
-# Open-WbeUI Client
+# Open-WebUI Client
 docker run -it --rm --network=host --add-host=host.docker.internal:host-gateway ghcr.io/open-webui/open-webui:main
 ```
+
+## ROS  
 
 ### OpenCV
 https://qengineering.eu/install-opencv-on-orin-nano.html
@@ -173,7 +180,7 @@ docker pull nvcr.io/nvidia/l4t-base:r35.2.1
 sudo apt install libgtk-3-dev
 ```
 
-Git repos as basis:
+### Nvidia Isaac ROS2 + Orbbec camera:
 ```
 mkdir -p ~/workspaces/isaac_ros-dev/src
 cd ~/workspaces/isaac_ros-dev/src
@@ -256,7 +263,6 @@ Password: MTZ...
 
 sudo docker build -t isaac_ros_orbbec .
 ```
-
 
 ```
 ros2 launch orbbec_camera astra.launch.py \
