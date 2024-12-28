@@ -41,7 +41,7 @@ sudo apt install xrdp
 
 ### Swapfile
 https://www.jetson-ai-lab.com/tips_ram-optimization.html  
-
+https://github.com/dusty-nv/jetson-containers/blob/master/docs/setup.md
 ```
 sudo systemctl disable nvzramconfig
 sudo fallocate -l 16G /mnt/16GB.swap
