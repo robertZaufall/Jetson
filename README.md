@@ -45,7 +45,8 @@ sudo apt-get update && sudo apt-get install openssh-server
 sudo systemctl enable ssh
 sudo systemctl start ssh
 ```
-on Ubuntu: `~/.ssh/authorized_keys` put public key in folder, in folder above private key if any to put
+- put public key(s) to folder `~/.ssh/authorized_keys` for remote connections  
+- generate key in `~/.ssh` using `ssh-keygen` or put existing private/pub key pair to connect to visualstudio.com or other sites  
 
 ### Swapfile
 https://www.jetson-ai-lab.com/tips_ram-optimization.html  
@@ -70,15 +71,6 @@ docker run hello-world
 
 ### Share folder in Filemanager
 Share folder via UI.  
-
-### Setup remote SSH
-Local device  
-```
-ssh-keygen
-```
-
-Install VS Code Remote-SSH extension
-Connect to Ubuntu.
 
 ### Jetson containers
 https://github.com/dusty-nv/jetson-containers  
