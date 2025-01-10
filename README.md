@@ -19,6 +19,7 @@ sudo apt install exfatprogs
 ### Install tools  
 Basic tools  
 ```
+sudo apt install nano
 # Chromium (UI)
 # Code (terminal)
 ```
@@ -60,7 +61,15 @@ sudo swapon /mnt/16GB.swap
 echo '/mnt/16GB.swap none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
+### Create nova_ssd for Docker and ROS
+```
+sudo mkdir -p /mnt/nova_ssd
+sudo mount /dev/nvme0n1 /mnt/nova_ssd
+sudo chown ${USER}:${USER} /mnt/nova_ssd
+```
+
 ### Docker
+Docker user, group and groups permissions
 ```
 sudo groupadd docker
 sudo usermod -aG docker $USER
@@ -69,31 +78,41 @@ docker run hello-world
 # 'reboot' if necessary
 ```
 
-### Share folder in Filemanager
-Share folder via UI.  
-
-### Jetson containers
-https://github.com/dusty-nv/jetson-containers  
+Move Docker to nova_ssd:
 ```
-# install the container tools
-git clone https://github.com/dusty-nv/jetson-containers
-bash jetson-containers/install.sh
-```
-Local directory get's connected with `jetson-containers`.
-Dependecies can be edited in the Dockerfile comments. Versions can be added to `config.py` files.
-
-#### Ollama
-https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/ollama
-```
-# models cached under jetson-containers/data
-jetson-containers run --name ollama $(autotag ollama)
-/bin/ollama run mistral
-
-# Open-WebUI Client
-docker run -it --rm --network=host --add-host=host.docker.internal:host-gateway ghcr.io/open-webui/open-webui:main
+sudo systemctl stop docker
+sudo du -csh /var/lib/docker/ && \
+    sudo mkdir /mnt/nova_ssd/docker && \
+    sudo rsync -axPS /var/lib/docker/ /mnt/nova_ssd/docker/ && \
+    sudo du -csh  /mnt/nova_ssd/docker/
 ```
 
-## ROS  
+Edit daemon.json set set default runtime and location
+```
+sudo nano /etc/docker/daemon.json
+```
+```json
+{
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    },
+    "default-runtime": "nvidia",
+    "data-root": "/mnt/nova_ssd/docker"
+}
+```
+
+Remove old Docker folder, restart service and check logs
+```
+sudo mv /var/lib/docker /var/lib/docker.old
+sudo systemctl daemon-reload && \
+    sudo systemctl restart docker && \
+    sudo journalctl -u docker
+```
+
+## ROS 
 
 ### OpenCV
 https://qengineering.eu/install-opencv-on-orin-nano.html
@@ -106,10 +125,6 @@ sudo chmod 755 ./OpenCV-4-10-0.sh
 rm OpenCV-4-10-0.sh
 sudo rm -rf ~/opencv
 sudo rm -rf ~/opencv_contrib
-```
-check it with jtop
-```
-jtop
 ```
 
 ### Nvidia Isaac
@@ -132,52 +147,23 @@ sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 sudo apt-get update
 
 sudo apt install docker-buildx-plugin
+sudo apt install libgtk-3-dev
 ```
 
-```
-sudo chown ${USER}:${USER} /mnt/nova_ssd
-sudo systemctl stop docker
-sudo du -csh /var/lib/docker/ && \
-    sudo mkdir /mnt/nova_ssd/docker && \
-    sudo rsync -axPS /var/lib/docker/ /mnt/nova_ssd/docker/ && \
-    sudo du -csh  /mnt/nova_ssd/docker/
-```
-
+Create ROS Workspace on nova_ssd
 ```
 mkdir -p  /mnt/nova_ssd/workspaces/isaac_ros-dev/src
 echo "export ISAAC_ROS_WS=/mnt/nova_ssd/workspaces/isaac_ros-dev/" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Edit daemon.json
+Login ro Nvidia repo and pull first image :
 ```
-sudo apt install nano
-sudo vi /etc/docker/daemon.json
-```
+docker login nvcr.io
+Username: $oauthtoken
+Password: MTZ...
 
-```json
-{
-    "runtimes": {
-        "nvidia": {
-            "path": "nvidia-container-runtime",
-            "runtimeArgs": []
-        }
-    },
-    "default-runtime": "nvidia",
-    "data-root": "/mnt/nova_ssd/docker"
-}
-```
-
-```
-sudo mv /var/lib/docker /var/lib/docker.old
-sudo systemctl daemon-reload && \
-    sudo systemctl restart docker && \
-    sudo journalctl -u docker
 docker pull nvcr.io/nvidia/l4t-base:r35.2.1
-```
-
-```
-sudo apt install libgtk-3-dev
 ```
 
 ### Nvidia Isaac ROS2 + Orbbec camera:
@@ -257,10 +243,6 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 ```
-docker login nvcr.io
-Username: $oauthtoken
-Password: MTZ...
-
 sudo docker build -t isaac_ros_orbbec .
 ```
 
@@ -270,15 +252,28 @@ ros2 launch orbbec_camera astra.launch.py \
     depth_width:=640 depth_height:=480 depth_fps:=30 depth_format:=Y11
 ```
 
-
+### Jetson containers
+https://github.com/dusty-nv/jetson-containers  
 ```
+# install the container tools
+git clone https://github.com/dusty-nv/jetson-containers
+bash jetson-containers/install.sh
+```
+Local directory get's connected with `jetson-containers`.
+Dependecies can be edited in the Dockerfile comments. Versions can be added to `config.py` files.
+
+#### Ollama
+https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/ollama
+```
+# models cached under jetson-containers/data
+jetson-containers run --name ollama $(autotag ollama)
+/bin/ollama run mistral
+
+# Open-WebUI Client
+docker run -it --rm --network=host --add-host=host.docker.internal:host-gateway ghcr.io/open-webui/open-webui:main
 ```
 
-
+#### Faiss
 ```
+CUDA_VERSION=12.6 CUDNN_VERSION=9.3 jetson-containers build faiss
 ```
-
-
-```
-```
-
