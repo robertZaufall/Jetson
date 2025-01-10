@@ -33,11 +33,19 @@ jtop
 - auto login (user)
 - power settings: don't switch off screen
 - delete keyring password (app)
-- enable remote desktop sharing, vnc (optional)
+- enable remote desktop sharing, vnc (-> use password!)
 - install xrdp (optional)
 ```
 sudo apt install xrdp
 ```
+
+### SSH
+```
+sudo apt-get update && sudo apt-get install openssh-server
+sudo systemctl enable ssh
+sudo systemctl start ssh
+```
+on Ubuntu: `~/.ssh/authorized_keys` put public key in folder, in folder above private key if any to put
 
 ### Swapfile
 https://www.jetson-ai-lab.com/tips_ram-optimization.html  
