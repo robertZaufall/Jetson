@@ -278,3 +278,90 @@ docker run -it --rm --network=host --add-host=host.docker.internal:host-gateway 
 ```
 CUDA_VERSION=12.6 CUDNN_VERSION=9.3 jetson-containers build faiss
 ```
+
+
+## Local Container Registry (macos)
+
+### Add folders
+```
+mkdir ~/docker/registry
+mkdir ~/docker/certs
+mkdir ~/docker/config
+```
+  
+### Add DNS entry to hosts
+```
+sudo nano /etc/hosts
+```
+add `127.0.0.1 registry.local`  
+
+### Generate certificate
+```
+cd ~/docker/certs
+# openssl req -newkey rsa:4096 -nodes -sha256 -keyout domain.key -x509 -days 3650 -out domain.crt
+brew install openssl
+/opt/homebrew/opt/openssl@3.4/bin/openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout domain.key -out domain.crt \
+  -subj "/CN=registry.local" \
+  -addext "subjectAltName=DNS:registry.local" \
+  -days 3650
+
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
+mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001
+cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001/ca.crt
+curl -v --cacert domain.crt https://registry.local:5001/v2/
+```
+- add CRT file to Keychain Access (e.g. ouble click)
+- change trust settings to "Always trust"
+
+### Registry container
+create `config.yml` in `~/docker/config`  
+```
+version: 0.1
+log:
+  level: info
+  fields:
+    service: registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :5000
+  tls:
+    certificate: /certs/domain.crt
+    key: /certs/domain.key
+
+proxy:
+  remoteurl: https://registry-1.docker.io
+```
+
+start the container:
+```
+docker run -d \
+  --name registry \
+  -p 5001:5001 \
+  --restart=always \
+  -v ~/docker/config/config.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
+  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
+  -v ~/docker/registry:/var/lib/registry \
+  -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+  registry:2
+```
+
+### Docker
+Modify daemon.json e.g.:
+```
+{
+  "insecure-registries": [],
+  "registry-mirrors": [
+    "https://registry.local:5001"
+  ]
+}
+```
+
+### Test
+```
+docker run hello-world
+docker pull registry.local:5001/library/hello-world:latest
+```
