@@ -297,9 +297,10 @@ add `127.0.0.1 registry.local`
 
 ### Generate certificate
 ```
-cd ~/docker/certs
-# openssl req -newkey rsa:4096 -nodes -sha256 -keyout domain.key -x509 -days 3650 -out domain.crt
 brew install openssl
+cd ~/docker/certs
+
+# openssl req -newkey rsa:4096 -nodes -sha256 -keyout domain.key -x509 -days 3650 -out domain.crt
 /opt/homebrew/opt/openssl@3.4/bin/openssl req -x509 -nodes -newkey rsa:2048 \
   -keyout domain.key -out domain.crt \
   -subj "/CN=registry.local" \
@@ -311,8 +312,6 @@ mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:500
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001/ca.crt
 curl -v --cacert domain.crt https://registry.local:5001/v2/
 ```
-- add CRT file to Keychain Access (e.g. ouble click)
-- change trust settings to "Always trust"
 
 ### Registry container
 create `config.yml` in `~/docker/config`  
