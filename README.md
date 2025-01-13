@@ -285,7 +285,8 @@ CUDA_VERSION=12.6 CUDNN_VERSION=9.3 jetson-containers build faiss
 ### Add folders
 ```
 mkdir ~/docker/registry
-mkdir ~/docker/mirror
+mkdir ~/docker/mirror_docker_io
+mkdir ~/docker/mirror_nvcr_io
 mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
@@ -294,9 +295,9 @@ mkdir ~/docker/config
 ```
 sudo nano /etc/hosts
 ```
-add `127.0.0.1 registry.local`  
+add `127.0.0.1 registry.local` and/or `127.0.0.1 mirror.local` 
 
-### Generate certificate
+### Generate certificate (use newer openssl, to get MACOS compatible certificates)  
 ```
 brew install openssl
 cd ~/docker/certs
@@ -309,12 +310,14 @@ cd ~/docker/certs
   -days 3650
 
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
+
+# each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5555: registry)
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001
+mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001/ca.crt
+cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002/ca.crt
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555/ca.crt
-curl -v --cacert domain.crt https://registry.local:5001/v2/
-curl -v --cacert domain.crt https://registry.local:5555/v2/
 ```
 
 ### Registry container
@@ -352,26 +355,7 @@ docker run -d \
 ```
 
 ### Mirror container
-create `config_mirror.yml` in `~/docker/config`  
-```
-version: 0.1
-log:
-  level: debug
-  fields:
-    service: registry
-storage:
-  filesystem:
-    rootdirectory: /var/lib/registry
-http:
-  addr: :5001
-  tls:
-    certificate: /certs/domain.crt
-    key: /certs/domain.key
-proxy:
-  remoteurl: https://registry-1.docker.io
-```
-
-simplified:
+create generic `config_mirror.yml` in `~/docker/config`  
 ```
 version: 0.1
 log:
@@ -390,19 +374,8 @@ proxy:
   remoteurl:
 ```
 
-start the container:
-```
-docker run -d \
-  --name mirror_docker_io \
-  -p 5001:5001 \
-  --restart=always \
-  -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
-  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
-  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
-  -v ~/docker/mirror_docker_io:/var/lib/registry \
-  registry:2
-```
-start the container (simple config_mirror.yml) for docker.io:
+start the container:  
+- for docker.io:
 ```
 docker run -d \
   --name mirror_docker_io \
@@ -415,7 +388,8 @@ docker run -d \
   -e REGISTRY_PROXY_REMOTEURL="https://registry-1.docker.io" \
   registry:2
 ```
-start the container (simple config_mirror.yml) for nvcr.io:
+
+- for nvcr.io (use real username and password):  
 ```
 docker run -d \
   --name mirror_nvcr_io \
@@ -431,8 +405,8 @@ docker run -d \
   registry:2
 ```
 
-### Docker
-Modify daemon.json e.g.:
+### Docker on MACOS
+Modify daemon.json and restart via UI:  
 ```
 {
   "insecure-registries": [],
@@ -442,32 +416,45 @@ Modify daemon.json e.g.:
   ]
 }
 ```
-restart Docker
 
-### Test
+### Test (use "library" for docker.io)
+Check website for valid certificate:  
 ```
-docker run hello-world
-docker pull registry.local:5001/library/hello-world:latest
-docker pull localhost:5001/nvidia/l4t-base:r36.2.0
-docker pull registry.local:5555/hello-world:latest
+cd ~/docker/certs
 curl -v --cacert domain.crt https://registry.local:5001/v2/
-
+curl -v --cacert domain.crt https://registry.local:5002/v2/
+curl -v --cacert domain.crt https://registry.local:5555/v2/
 ```
 
-### Jeson
-Copy crt file to e.g. git folder by using VSCode Remote.
+Pull/push test images:  
 ```
-chmod 644 domain.crt
+docker pull registry.local:5001/library/hello-world:latest
+docker pull registry.local:5002/nvidia/l4t-base:r36.2.0
+
+docker tag hello-world registry.local:5555/hello-world
+docker push registry.local:5555/hello-world
+
+docker pull registry.local:5555/hello-world
+```
+
+### Jetson
+Copy crt file e.g. to git folder by using VSCode Remote and register ca cert for each endpoint:
+```
 sudo mkdir -p /etc/docker/certs.d/registry.local:5001
+sudo mkdir -p /etc/docker/certs.d/registry.local:5002
 sudo mkdir -p /etc/docker/certs.d/registry.local:5555
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo cp domain.crt /etc/docker/certs.d/registry.local:5002/ca.crt
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5555/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt
+
 sudo nano /etc/docker/daemon.json
 sudo systemctl restart docker
 ```
-`daemon.json` content:
+
+Modify `daemon.json` content:
 ```
 {
     "runtimes": {
@@ -479,12 +466,21 @@ sudo systemctl restart docker
     "default-runtime": "nvidia",
     "data-root": "/mnt/nova_ssd/docker",
     "registry-mirrors": [
-        "https://registry.local:5001"
+        "https://registry.local:5001",
+        "https://registry.local:5002"
     ]
 }
 ```
-Push images to registry:
+
+Remark:  
+Only `docker.io` images are cached by the proxy automatically.
+`nvcr.io` images for example have to be loaded using `registry.local:5002/nvidia/<image>:<tag>` and are then getting cached.  
+
+Push locally built images to registry:  
 ```
+docker tag abc registry.local:5555/abc
+docker push registry.local:5555/abc:latest
+
 docker tag faiss:r36.4.0-cu126 registry.local:5001/faiss:r36.4.0-cu126
 docker push registry.local:5001/faiss:r36.4.0-cu126
 ```
