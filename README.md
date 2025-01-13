@@ -297,7 +297,7 @@ sudo nano /etc/hosts
 ```
 add `127.0.0.1 registry.local` and/or `127.0.0.1 mirror.local` 
 
-### Generate certificate (use newer openssl, to get MACOS compatible certificates)  
+### Generate certificate (use newer `openssl`, to get `MACOS` compatible certificates)  
 ```
 brew install openssl
 cd ~/docker/certs
