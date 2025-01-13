@@ -291,7 +291,7 @@ mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
   
-### Add DNS entry to hosts
+### Add DNS entry to hosts on `MACOS` and `Jetson`
 ```
 sudo nano /etc/hosts
 ```
@@ -302,7 +302,9 @@ add `127.0.0.1 registry.local` and/or `127.0.0.1 mirror.local`
 brew install openssl
 cd ~/docker/certs
 
+# this did not work:  
 # openssl req -newkey rsa:4096 -nodes -sha256 -keyout domain.key -x509 -days 3650 -out domain.crt
+
 /opt/homebrew/opt/openssl@3.4/bin/openssl req -x509 -nodes -newkey rsa:2048 \
   -keyout domain.key -out domain.crt \
   -subj "/CN=registry.local" \
