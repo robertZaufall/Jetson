@@ -214,6 +214,6 @@ Push locally built images to registry:
 docker tag abc registry.local:5555/abc
 docker push registry.local:5555/abc
 
-docker tag faiss:r36.4.0-cu126 registry.local:5001/faiss:r36.4.0-cu126
-docker push registry.local:5001/faiss:r36.4.0-cu126
+docker tag faiss:r36.4.0-cu126 registry.local:5555/faiss:r36.4.0-cu126
+docker push registry.local:5555/faiss:r36.4.0-cu126
 ```
