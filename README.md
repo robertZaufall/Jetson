@@ -363,4 +363,33 @@ Modify daemon.json e.g.:
 ```
 docker run hello-world
 docker pull registry.local:5001/library/hello-world:latest
+curl -v --cacert domain.crt https://registry.local:5001/v2/
+
+```
+
+### Jeson
+Copy crt file to e.g. git folder by using VSCode Remote.
+```
+chmod 644 domain.crt
+sudo mkdir -p /etc/docker/certs.d/registry.local:5001
+sudo cp domain.crt /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo nano /etc/docker/daemon.json
+sudo systemctl restart docker
+```
+`daemon.json` content:
+```
+{
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    },
+    "default-runtime": "nvidia",
+    "data-root": "/mnt/nova_ssd/docker",
+    "registry-mirrors": [
+        "https://registry.local:5001"
+    ]
+}
 ```
