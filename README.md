@@ -309,27 +309,63 @@ cd ~/docker/certs
 
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001
+mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001/ca.crt
+cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555/ca.crt
 curl -v --cacert domain.crt https://registry.local:5001/v2/
+curl -v --cacert domain.crt https://registry.local:5555/v2/
 ```
 
 ### Registry container
-create `config.yml` in `~/docker/config`  
+create `config_registry.yml` in `~/docker/config`  
 ```
 version: 0.1
 log:
-  level: info
+  level: debug
+  fields:
+    service: registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  delete:
+    enabled: true
+http:
+  addr: :5555
+  tls:
+    certificate: /certs/domain.crt
+    key: /certs/domain.key
+```
+
+start the container
+```
+docker run -d \
+  --name registry \
+  -p 5555:5555 \
+  --restart=always \
+  -v ~/docker/config/config_registry.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
+  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
+  -v ~/docker/registry:/var/lib/registry \
+  -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+  registry:2
+```
+
+### Mirror container
+create `config_mirror.yml` in `~/docker/config`  
+```
+version: 0.1
+log:
+  level: debug
   fields:
     service: registry
 storage:
   filesystem:
     rootdirectory: /var/lib/registry
 http:
-  addr: :5000
+  addr: :5001
   tls:
     certificate: /certs/domain.crt
     key: /certs/domain.key
-
 proxy:
   remoteurl: https://registry-1.docker.io
 ```
@@ -337,14 +373,13 @@ proxy:
 start the container:
 ```
 docker run -d \
-  --name registry \
+  --name mirror \
   -p 5001:5001 \
   --restart=always \
-  -v ~/docker/config/config.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
   -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
   -v ~/docker/certs/domain.key:/certs/domain.key:ro \
-  -v ~/docker/registry:/var/lib/registry \
-  -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+  -v ~/docker/mirror:/var/lib/registry \
   registry:2
 ```
 
@@ -358,11 +393,13 @@ Modify daemon.json e.g.:
   ]
 }
 ```
+restart Docker
 
 ### Test
 ```
 docker run hello-world
 docker pull registry.local:5001/library/hello-world:latest
+docker pull registry.local:5555/hello-world:latest
 curl -v --cacert domain.crt https://registry.local:5001/v2/
 
 ```
@@ -372,8 +409,11 @@ Copy crt file to e.g. git folder by using VSCode Remote.
 ```
 chmod 644 domain.crt
 sudo mkdir -p /etc/docker/certs.d/registry.local:5001
+sudo mkdir -p /etc/docker/certs.d/registry.local:5555
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo cp domain.crt /etc/docker/certs.d/registry.local:5555/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt
+sudo chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt
 sudo nano /etc/docker/daemon.json
 sudo systemctl restart docker
 ```
@@ -392,4 +432,9 @@ sudo systemctl restart docker
         "https://registry.local:5001"
     ]
 }
+```
+Push images to registry:
+```
+docker tag faiss:r36.4.0-cu126 registry.local:5001/faiss:r36.4.0-cu126
+docker push registry.local:5001/faiss:r36.4.0-cu126
 ```
