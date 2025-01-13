@@ -285,6 +285,7 @@ CUDA_VERSION=12.6 CUDNN_VERSION=9.3 jetson-containers build faiss
 ### Add folders
 ```
 mkdir ~/docker/registry
+mkdir ~/docker/mirror
 mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
@@ -370,16 +371,63 @@ proxy:
   remoteurl: https://registry-1.docker.io
 ```
 
+simplified:
+```
+version: 0.1
+log:
+  level: debug
+  fields:
+    service: registry
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :5000
+  tls:
+    certificate: /certs/domain.crt
+    key: /certs/domain.key
+proxy:
+  remoteurl:
+```
+
 start the container:
 ```
 docker run -d \
-  --name mirror \
+  --name mirror_docker_io \
   -p 5001:5001 \
   --restart=always \
   -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
   -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
   -v ~/docker/certs/domain.key:/certs/domain.key:ro \
-  -v ~/docker/mirror:/var/lib/registry \
+  -v ~/docker/mirror_docker_io:/var/lib/registry \
+  registry:2
+```
+start the container (simple config_mirror.yml) for docker.io:
+```
+docker run -d \
+  --name mirror_docker_io \
+  -p 5001:5000 \
+  --restart=always \
+  -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
+  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
+  -v ~/docker/mirror_docker_io:/var/lib/registry \
+  -e REGISTRY_PROXY_REMOTEURL="https://registry-1.docker.io" \
+  registry:2
+```
+start the container (simple config_mirror.yml) for nvcr.io:
+```
+docker run -d \
+  --name mirror_nvcr_io \
+  -p 5002:5000 \
+  --restart=always \
+  -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
+  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
+  -v ~/docker/mirror_nvcr_io:/var/lib/registry \
+  -e REGISTRY_PROXY_REMOTEURL="https://nvcr.io" \
+  -e REGISTRY_PROXY_USERNAME="$oauthtoken" \
+  -e REGISTRY_PROXY_PASSWORD="MTZ..." \
   registry:2
 ```
 
@@ -389,7 +437,8 @@ Modify daemon.json e.g.:
 {
   "insecure-registries": [],
   "registry-mirrors": [
-    "https://registry.local:5001"
+    "https://registry.local:5001",
+    "https://registry.local:5002"
   ]
 }
 ```
@@ -399,6 +448,7 @@ restart Docker
 ```
 docker run hello-world
 docker pull registry.local:5001/library/hello-world:latest
+docker pull localhost:5001/nvidia/l4t-base:r36.2.0
 docker pull registry.local:5555/hello-world:latest
 curl -v --cacert domain.crt https://registry.local:5001/v2/
 
