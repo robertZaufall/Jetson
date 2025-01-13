@@ -280,7 +280,7 @@ CUDA_VERSION=12.6 CUDNN_VERSION=9.3 jetson-containers build faiss
 ```
 
 
-## Local Container Registry (macos)
+## Local Container Registry (here: `MACOS`)
 
 ### Add folders
 ```
@@ -291,7 +291,7 @@ mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
   
-### Add DNS entry to hosts on `MACOS` and `Jetson`
+### Add DNS entry to hosts on `MACOS`
 ```
 sudo nano /etc/hosts
 ```
@@ -356,7 +356,7 @@ docker run -d \
   registry:2
 ```
 
-### Mirror container
+### Mirror container (one for each external registry)
 create generic `config_mirror.yml` in `~/docker/config`  
 ```
 version: 0.1
@@ -407,8 +407,8 @@ docker run -d \
   registry:2
 ```
 
-### Docker on MACOS
-Modify daemon.json and restart via UI:  
+### Docker on `MACOS`
+Modify `daemon.json` and restart via UI:  
 ```
 {
   "insecure-registries": [],
@@ -419,7 +419,7 @@ Modify daemon.json and restart via UI:
 }
 ```
 
-### Test (use "library" for docker.io)
+### Test
 Check website for valid certificate:  
 ```
 cd ~/docker/certs
@@ -428,7 +428,7 @@ curl -v --cacert domain.crt https://registry.local:5002/v2/
 curl -v --cacert domain.crt https://registry.local:5555/v2/
 ```
 
-Pull/push test images:  
+Pull/push test images (use `library` as namespace for `docker.io`):  
 ```
 docker pull registry.local:5001/library/hello-world:latest
 docker pull registry.local:5002/nvidia/l4t-base:r36.2.0
@@ -439,7 +439,17 @@ docker push registry.local:5555/hello-world
 docker pull registry.local:5555/hello-world
 ```
 
-### Jetson
+### Jetson  
+Add DNS entry to hosts:  
+```
+sudo nano /etc/hosts
+```
+Insert one or two entries:  
+```
+127.0.0.1 registry.local
+127.0.0.1 mirror.local
+```
+
 Copy crt file e.g. to git folder by using VSCode Remote and register ca cert for each endpoint:
 ```
 sudo mkdir -p /etc/docker/certs.d/registry.local:5001
@@ -451,12 +461,15 @@ sudo cp domain.crt /etc/docker/certs.d/registry.local:5555/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt
+```
 
+Mofify `daemon.json` and restart docker:
+```
 sudo nano /etc/docker/daemon.json
 sudo systemctl restart docker
 ```
 
-Modify `daemon.json` content:
+`daemon.json` content:
 ```
 {
     "runtimes": {
