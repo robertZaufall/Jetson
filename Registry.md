@@ -236,4 +236,4 @@ docker
 
 Docker tree:  
 
-<img src="images/docker_registry_tree.png" alt="Docker Registry Tree" width="50%">
+<img src="images/docker_registry_tree.png" alt="Docker Registry Tree" width="300">
