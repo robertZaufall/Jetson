@@ -240,7 +240,7 @@ Docker tree:
 
 
 ## Tag, push, copy images  
-Tagging, pushing and copying to another registry (here: Azure CR) using `skopeo`.
+Tagging, pushing and copying to another registry (here: Azure CR) using `skopeo`.  
 Install `skopeo`:
 ```
 sudo apt install skopeo -y
