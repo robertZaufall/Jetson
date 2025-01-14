@@ -1,6 +1,6 @@
-## ROS 
+# ROS 
 
-### OpenCV
+## OpenCV
 https://qengineering.eu/install-opencv-on-orin-nano.html
 ```
 wget https://github.com/Qengineering/Install-OpenCV-Jetson-Nano/raw/main/OpenCV-4-10-0.sh
@@ -13,7 +13,7 @@ sudo rm -rf ~/opencv
 sudo rm -rf ~/opencv_contrib
 ```
 
-### Nvidia Isaac
+## Nvidia Isaac
 ```
 sudo apt-get install git-lfs
 git lfs install --skip-repo
@@ -52,7 +52,7 @@ Password: MTZ...
 docker pull nvcr.io/nvidia/l4t-base:r35.2.1
 ```
 
-### Nvidia Isaac ROS2 + Orbbec camera:
+## Nvidia Isaac ROS2 + Orbbec camera:
 ```
 mkdir -p ~/workspaces/isaac_ros-dev/src
 cd ~/workspaces/isaac_ros-dev/src

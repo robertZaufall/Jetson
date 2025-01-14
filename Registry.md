@@ -1,6 +1,6 @@
 # Local Container Registry and mirrors for Jetson (here: on `MACOS` platform)
 
-### Add folders
+## Add folders
 ```
 mkdir ~/docker/registry
 mkdir ~/docker/mirror_docker_io
@@ -9,13 +9,13 @@ mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
   
-### Add DNS entry to hosts on `MACOS`
+## Add DNS entry to hosts on `MACOS`
 ```
 sudo nano /etc/hosts
 ```
 add `127.0.0.1 registry.local` and/or `127.0.0.1 mirror.local` 
 
-### Generate certificate (use newer `openssl`, to get `MACOS` compatible certificates)  
+## Generate certificate (use newer `openssl`, to get `MACOS` compatible certificates)  
 ```
 brew install openssl
 cd ~/docker/certs
@@ -40,7 +40,7 @@ cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.loca
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555/ca.crt
 ```
 
-### Registry container
+## Registry container
 create `config_registry.yml` in `~/docker/config`  
 ```
 version: 0.1
@@ -74,7 +74,7 @@ docker run -d \
   registry:2
 ```
 
-### Mirror container (one for each external registry)
+## Mirror container (one for each external registry)
 create generic `config_mirror.yml` in `~/docker/config`  
 ```
 version: 0.1
@@ -125,7 +125,7 @@ docker run -d \
   registry:2
 ```
 
-### Docker on `MACOS`
+## Docker on `MACOS`
 Modify `daemon.json` and restart via UI:  
 ```
 {
@@ -137,7 +137,7 @@ Modify `daemon.json` and restart via UI:
 }
 ```
 
-### Test
+## Test
 Check website for valid certificate:  
 ```
 cd ~/docker/certs
@@ -157,7 +157,7 @@ docker push registry.local:5555/hello-world
 docker pull registry.local:5555/hello-world
 ```
 
-### Jetson  
+## Jetson  
 Add DNS entry to hosts:  
 ```
 sudo nano /etc/hosts
@@ -217,3 +217,23 @@ docker push registry.local:5555/abc
 docker tag faiss:r36.4.0-cu126 registry.local:5555/faiss:r36.4.0-cu126
 docker push registry.local:5555/faiss:r36.4.0-cu126
 ```
+
+## Result on `MACOS`
+
+Filesystem:
+```
+docker
+├── certs
+│   ├── domain.crt
+│   └── domain.key
+├── config
+│   ├── config_mirror.yml
+│   └── config_registry.yml
+├── mirror_docker_io
+├── mirror_nvcr_io
+└── registry
+```
+
+Docker tree:  
+
+<img src="images/docker_registry_tree.png" alt="Docker Registry Tree" width="50%">
