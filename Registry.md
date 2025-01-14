@@ -237,3 +237,41 @@ docker
 Docker tree:  
 
 <img src="images/docker_registry_tree.png" alt="Docker Registry Tree" width="300">
+
+
+## Tag, push, copy images  
+Tagging, pushing and copying to another registry (here: Azure CR) using `skopeo`.
+Install `skopeo`:
+```
+sudo apt install skopeo -y
+```
+
+Create and start the script:  
+```
+#!/usr/bin/env bash
+
+# Array of image names
+IMAGES=(
+  "image1"
+  "image2"
+  "image3"
+)
+
+# Azure Container Registry name
+ACR_NAME="<acr_name>.azurecr.io"
+skopeo login "$ACR_NAME" --username "MY_USERNAME" --password "MY_PASSWORD"
+
+# Loop through each image and copy it
+for IMAGE in "${IMAGES[@]}"; do
+
+   docker tag "$IMAGE" registry.local:5555/"$IMAGE"
+   docker push registry.local:5555/"$IMAGE"
+
+   skopeo copy \
+     docker://registry.local:5555/"$IMAGE":latest \
+     docker://"$ACR_NAME"/"$IMAGE":latest
+  
+done
+
+echo "Done."
+```
