@@ -68,7 +68,7 @@ sudo chown ${USER}:${USER} /mnt/nova_ssd
 ```
 
 ## Docker
-Docker user, group and groups permissions
+### Docker user, group and groups permissions
 ```
 sudo groupadd docker
 sudo usermod -aG docker $USER
@@ -77,7 +77,7 @@ docker run hello-world
 # 'reboot' if necessary
 ```
 
-Move Docker to nova_ssd:
+### Move Docker to nova_ssd:
 ```
 sudo systemctl stop docker
 sudo du -csh /var/lib/docker/ && \
@@ -109,4 +109,17 @@ sudo mv /var/lib/docker /var/lib/docker.old
 sudo systemctl daemon-reload && \
     sudo systemctl restart docker && \
     sudo journalctl -u docker
+```
+
+### Run jtop in a docker container
+Map `/run/jtop.sock` from host to container when starting:  
+```
+sudo docker run --runtime nvidia -it --rm -v /run/jtop.sock:/run/jtop.sock --network=host dustynv/opencv:4.8.1-r36.2.0
+```  
+
+Inside container:  
+```
+apt install python3-pip
+pip install jetson-stats
+jtop
 ```
