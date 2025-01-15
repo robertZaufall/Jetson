@@ -29,6 +29,10 @@ cd ~/docker/certs
   -addext "subjectAltName=DNS:registry.local" \
   -days 3650
 
+# remark:
+# generate second certificate for 'mirror.local' if needed
+# subsequent steps have to be adapted in this case
+
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
 
 # each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5555: registry)
@@ -138,7 +142,7 @@ Modify `daemon.json` and restart via UI:
 ```
 
 ## Test
-Check website for valid certificate:  
+Check api endpoints for valid certificate:  
 ```
 cd ~/docker/certs
 curl -v --cacert domain.crt https://registry.local:5001/v2/
@@ -261,12 +265,16 @@ IMAGES=(
 ACR_NAME="<acr_name>.azurecr.io"
 skopeo login "$ACR_NAME" --username "MY_USERNAME" --password "MY_PASSWORD"
 
-# Loop through each image and copy it
+# Loop through each image
 for IMAGE in "${IMAGES[@]}"; do
 
+   # tag
    docker tag "$IMAGE" registry.local:5555/"$IMAGE"
+
+   # push
    docker push registry.local:5555/"$IMAGE"
 
+   # copy
    skopeo copy \
      docker://registry.local:5555/"$IMAGE":latest \
      docker://"$ACR_NAME"/"$IMAGE":latest
