@@ -32,12 +32,7 @@ kubectl get nodes
 
 ## Test
 
-- create deployment manifest file  
-```
-nano test_k3s.yaml
-```
-
-- deployment manifest file content  
+- create deployment manifest file `nano test_k3s.yaml`  
 ```
 apiVersion: v1
 kind: Pod
@@ -56,9 +51,10 @@ spec:
 - start deployment    
 ```
 kubectl apply -f test_k3s.yaml
+sudo kubectl cluster-info
 ```
 
-- console to pod  
+- start console to pod  
 ```
 kubectl exec -it torch -- python3
 ```
