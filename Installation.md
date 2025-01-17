@@ -28,6 +28,10 @@ Basic tools
 ```
 sudo apt install nano -y
 sudo apt install btop -y
+
+sudo apt install git-lfs -y
+# usage: git lfs install
+
 # Chromium (UI)
 # Code (terminal)
 ```
