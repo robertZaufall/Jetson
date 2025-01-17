@@ -3,6 +3,7 @@
 ## JetPack 6.2 with SuperMode
 
 [NVIDIA JetPack 6.2 Brings Super Mode to NVIDIA Jetson Orin Nano and Jetson Orin NX Modules](https://developer.nvidia.com/blog/nvidia-jetpack-6-2-brings-super-mode-to-nvidia-jetson-orin-nano-and-jetson-orin-nx-modules)  
+[JetPack 6.2 Brings Super Mode to NVIDIA Jetson Orin Nano and Jetson Orin NX Modules](https://forums.developer.nvidia.com/t/jetpack-6-2-brings-super-mode-to-nvidia-jetson-orin-nano-and-jetson-orin-nx-modules/320343)  
 
 Use new flash configuration `jetson-orin-nano-devkit-super.conf`.  
 
@@ -10,6 +11,8 @@ Use new flash configuration `jetson-orin-nano-devkit-super.conf`.
 sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
   -c tools/kernel_flash/flash_l4t_t234_nvme.xml -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
   --showlogs --network usb0 jetson-orin-nano-devkit-super internal
+
+
 ```
 [My orin nano has been upgraded to jetpack 6.2 with no performance improvement or CPU/GPU frequency](https://forums.developer.nvidia.com/t/my-orin-nano-has-been-upgraded-to-jetpack-6-2-with-no-performance-improvement-or-cpu-gpu-frequency/320282)  
 [Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions)  
