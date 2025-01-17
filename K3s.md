@@ -1,6 +1,6 @@
 # K3s on Jetson
 
-[How to run Cluster Management Software K3s on NVIDIA Jetson?](]https://www.seeedstudio.com/blog/2021/01/22/how-to-run-cluster-management-software-k3s-on-nvidia-jetson) (2021)  
+[How to run Cluster Management Software K3s on NVIDIA Jetson?](https://www.seeedstudio.com/blog/2021/01/22/how-to-run-cluster-management-software-k3s-on-nvidia-jetson) (2021)  
 [Step-by-Step Guide: Installing Kubernetes on Jetson nano](https://medium.com/@jpraveenkanna/step-by-step-guide-installing-kubernetes-on-a-jetson-nano-67da8fa183f8) (2023)  
 [How to Install Kubernetes Using K3s On Ubuntu 22.04](https://www.linuxtechi.com/install-kubernetes-using-k3s-on-ubuntu/) (2024)  
 [Triton Inference Server on Nvidia Jetson using K3s and MinIO](https://www.hackster.io/shahizat/triton-inference-server-on-nvidia-jetson-using-k3s-and-minio-cbcfe3) (2024)  
