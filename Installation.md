@@ -20,25 +20,18 @@ sudo apt update && sudo apt upgrade
 sudo apt install iwlwifi-modules
 ```
 
-## Exfat
-```
-sudo add-apt-repository universe
-sudo apt update
-sudo apt install exfatprogs
-# sudo apt install exfat-fuse
-```
-
 ## Install tools  
 Basic tools  
 ```
-sudo apt install nano
+sudo apt install nano -y
 # Chromium (UI)
 # Code (terminal)
 ```
 jtop  
 ```
-sudo apt install python3-pip
+sudo apt install python3-pip -y
 sudo pip3 install -U jetson-stats
+sudo systemctl restart jtop.service
 jtop
 ```
 
@@ -137,4 +130,12 @@ Inside container:
 apt install python3-pip
 pip install jetson-stats
 jtop
+```
+
+## Exfat
+```
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install exfatprogs
+# sudo apt install exfat-fuse
 ```
