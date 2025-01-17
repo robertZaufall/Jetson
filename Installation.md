@@ -61,6 +61,7 @@ sudo systemctl start ssh
 - put public key(s) to folder `~/.ssh/authorized_keys` for remote connections  
 - generate key in `~/.ssh` using `ssh-keygen` or put existing private/pub key pair to connect to visualstudio.com or other sites
 - secure copied keys, e.g.: `chmod 600 /home/jetson/.ssh/id_rsa`
+- VSCode: if key exists `ssh-keygen -R 192.168.250.129`
 
 ## Swapfile
 https://www.jetson-ai-lab.com/tips_ram-optimization.html  
