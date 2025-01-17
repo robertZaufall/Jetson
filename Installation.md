@@ -24,6 +24,7 @@ sudo apt install iwlwifi-modules
 Basic tools  
 ```
 sudo apt install nano -y
+sudo apt install btop -y
 # Chromium (UI)
 # Code (terminal)
 ```
@@ -37,9 +38,9 @@ jtop
 
 ## Remote, login
 - auto login (user)
-- power settings: don't switch off screen
 - delete keyring password (app)
 - enable remote desktop sharing, vnc (-> use password!)
+- power settings: don't switch off screen
 - install xrdp (optional)
 ```
 sudo apt install xrdp
