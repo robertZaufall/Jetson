@@ -1,5 +1,18 @@
 # Jetson Orin NX
 
+## JetPack 6.2 with SuperMode
+
+https://developer.nvidia.com/blog/nvidia-jetpack-6-2-brings-super-mode-to-nvidia-jetson-orin-nano-and-jetson-orin-nx-modules/  
+
+Use new flash configuration `jetson-orin-nano-devkit-super.conf`.  
+
+```
+sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
+  -c tools/kernel_flash/flash_l4t_t234_nvme.xml -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
+  --showlogs --network usb0 jetson-orin-nano-devkit-super internal
+```
+https://forums.developer.nvidia.com/t/my-orin-nano-has-been-upgraded-to-jetpack-6-2-with-no-performance-improvement-or-cpu-gpu-frequency/320282  
+
 ## Fix wifi  
 ```
 sudo apt update && sudo apt upgrade
