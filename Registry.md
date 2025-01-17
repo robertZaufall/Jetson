@@ -168,8 +168,7 @@ sudo nano /etc/hosts
 ```
 Insert one or two entries:  
 ```
-127.0.0.1 registry.local
-127.0.0.1 mirror.local
+w.x.y.z registry.local
 ```
 
 Copy crt file e.g. to git folder by using VSCode Remote and register ca cert for each endpoint:
