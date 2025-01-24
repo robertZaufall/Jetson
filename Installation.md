@@ -6,16 +6,31 @@
 [JetPack 6.2 Brings Super Mode to NVIDIA Jetson Orin Nano and Jetson Orin NX Modules](https://forums.developer.nvidia.com/t/jetpack-6-2-brings-super-mode-to-nvidia-jetson-orin-nano-and-jetson-orin-nx-modules/320343)  
 
 Use new flash configuration `jetson-orin-nano-devkit-super.conf`.  
-
+From the host:  
 ```
+export JETPACK=$HOME/nvidia/nvidia_sdk/JetPack_6.2_Linux_.../Linux_for_Tegra
+
+cd $JETPACK
+sudo ./apply_binaries.sh
+sudo ./tools/l4t_flash_prerequisites.sh
+
+cd $JETPACK/tools
+ sudo ./l4t_create_default_user.sh -u <user_name> -p <password>
+
 sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
   -c tools/kernel_flash/flash_l4t_t234_nvme.xml -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
   --showlogs --network usb0 jetson-orin-nano-devkit-super internal
-
-
 ```
-[My orin nano has been upgraded to jetpack 6.2 with no performance improvement or CPU/GPU frequency](https://forums.developer.nvidia.com/t/my-orin-nano-has-been-upgraded-to-jetpack-6-2-with-no-performance-improvement-or-cpu-gpu-frequency/320282)  
-[Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions)  
+On the Jetson:  
+```
+sudo apt update && sudo apt upgrade
+sudo apt-get install nvidia-jetpack
+  
+```
+https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-62/install-setup/index.html#upgrade-jetpack  
+
+[Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions) 
+http://www.yahboom.net/study/Jetson-Orin-NX
 
 ## Fix wifi  
 ```
@@ -26,14 +41,8 @@ sudo apt install iwlwifi-modules
 ## Install tools  
 Basic tools  
 ```
-sudo apt install nano -y
-sudo apt install btop -y
-
-sudo apt install git-lfs -y
+sudo apt install nano btop curl chromium-browser git-lfs -y
 # usage: git lfs install
-
-# Chromium (UI)
-# Code (terminal)
 ```
 jtop  
 ```
