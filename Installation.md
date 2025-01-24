@@ -25,11 +25,10 @@ On the Jetson:
 ```
 sudo apt update && sudo apt upgrade
 sudo apt-get install nvidia-jetpack
-  
 ```
 https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-62/install-setup/index.html#upgrade-jetpack  
 
-[Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions) 
+[Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions)  
 http://www.yahboom.net/study/Jetson-Orin-NX
 
 ## Fix wifi  
