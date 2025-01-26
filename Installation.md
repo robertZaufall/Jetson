@@ -56,17 +56,8 @@ jtop
 - delete keyring password (app)
 - enable remote desktop sharing, vnc (-> use password!)
 - power settings: don't switch off screen
-- install xrdp (optional)
-```
-sudo apt install xrdp
-```
 
 ## SSH
-```
-sudo apt-get update && sudo apt-get install openssh-server
-sudo systemctl enable ssh
-sudo systemctl start ssh
-```
 - put public key(s) to folder `~/.ssh/authorized_keys` for remote connections  
 - generate key in `~/.ssh` using `ssh-keygen` or put existing private/pub key pair to connect to visualstudio.com or other sites
 - secure copied keys, e.g.: `chmod 600 /home/jetson/.ssh/id_rsa`
