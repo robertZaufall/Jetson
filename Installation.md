@@ -38,6 +38,9 @@ sudo apt install iwlwifi-modules
 ```
 
 ## Install tools  
+
+See also https://github.com/jetsonhacks/jetson-orin-setup
+
 Basic tools  
 ```
 sudo apt install nano btop curl chromium-browser git-lfs -y
