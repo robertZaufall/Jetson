@@ -1,7 +1,8 @@
 # Jetson Orin NX
 
 ## Upgrade  
-[Upgrade to 6.2.1](https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-621/install-setup/index.html)  
+[Upgrade to 6.2.1](https://forums.developer.nvidia.com/t/jetpack-6-2-1-jetson-linux-36-4-4-is-now-live/337333/2)  
+
 
 ## JetPack 6.2 with SuperMode
 
