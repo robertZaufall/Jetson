@@ -1,5 +1,8 @@
 # Jetson Orin NX
 
+## Upgrade  
+[Upgrade to 6.2.1](https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-621/install-setup/index.html#upgrade-jetpack)  
+
 ## JetPack 6.2 with SuperMode
 
 [NVIDIA JetPack 6.2 Brings Super Mode to NVIDIA Jetson Orin Nano and Jetson Orin NX Modules](https://developer.nvidia.com/blog/nvidia-jetpack-6-2-brings-super-mode-to-nvidia-jetson-orin-nano-and-jetson-orin-nx-modules)  
