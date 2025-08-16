@@ -41,7 +41,7 @@ sudo hostnamectl set-hostname NEWNAME
 sudo sed -i "s/^\(127\.0\.1\.1\s*\).*/\1NEWNAME/" /etc/hosts
 ```
 
-## Fix wifi  
+## Fix wifi (Yahboom carrier board)  
 ```
 sudo apt update && sudo apt upgrade
 sudo apt install iwlwifi-modules
