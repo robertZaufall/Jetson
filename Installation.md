@@ -66,7 +66,7 @@ jtop
 
 ## Remote, login
 - auto login (user)
-- delete keyring password (app)
+- delete keyring password (app), set empty password
 - enable remote desktop sharing, vnc (-> use password!)
 - power settings: don't switch off screen
 
