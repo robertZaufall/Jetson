@@ -35,6 +35,12 @@ https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-62/install-setu
 [Exploring NVIDIA Jetson Orin Nano Super Mode performance using Generative AI](https://developer.ridgerun.com/wiki/index.php/Exploring_NVIDIA_Jetson_Orin_Nano_Super_Mode_performance_using_Generative_AI#Jetson_Orin_Nano_Super_mode_enabling_and_Generative_AI_running_instructions)  
 http://www.yahboom.net/study/Jetson-Orin-NX
 
+## Rename device
+```
+sudo hostnamectl set-hostname NEWNAME
+sudo sed -i "s/^\(127\.0\.1\.1\s*\).*/\1NEWNAME/" /etc/hosts
+```
+
 ## Fix wifi  
 ```
 sudo apt update && sudo apt upgrade
