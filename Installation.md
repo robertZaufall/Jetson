@@ -64,6 +64,12 @@ sudo systemctl restart jtop.service
 jtop
 ```
 
+Add version number at `/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py` if needed: `"36.4.4": "6.2.1",` and restart
+```
+sudo systemctl restart jtop.service
+jtop
+```
+
 ## Remote, login
 - auto login (user)
 - delete keyring password (app), set empty password
