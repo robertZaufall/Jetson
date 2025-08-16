@@ -51,20 +51,23 @@ sudo apt install iwlwifi-modules
 
 See also https://github.com/jetsonhacks/jetson-orin-setup
 
-Basic tools  
+### Basic tools
+Basic tools installation
 ```
 sudo apt install nano btop curl chromium-browser git-lfs -y
 # usage: git lfs install
 ```
-jtop  
+### jtop
+jtop installation
 ```
 sudo apt install python3-pip -y
 sudo pip3 install -U jetson-stats
 sudo systemctl restart jtop.service
 jtop
 ```
-
-Add version number at `/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py` if needed: `"36.4.4": "6.2.1",` and restart
+If "jetpack" is found missing or jtop outdated, the version numbers can be added manually at   
+`/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py` by adding the line  
+`"36.4.4": "6.2.1",` and a restart  
 ```
 sudo systemctl restart jtop.service
 jtop
