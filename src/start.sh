@@ -555,6 +555,51 @@ else
   log " - Added $USERNAME to docker group. You may need to log out/in for group changes to take effect."
 fi
 
+log "23) Ensure snapd is 2.68.5 on Ubuntu 22.04 (hold to avoid 2.70.x)"
+TARGET_DEB_VER="2.68.5+ubuntu22.04.1"
+
+if command -v apt-get >/dev/null 2>&1; then
+  INSTALLED_DEB_VER=$(dpkg-query -W -f='${Version}' snapd 2>/dev/null || echo "")
+  # Check if the desired deb version is available from configured repos
+  if apt-cache madison snapd 2>/dev/null | awk '{print $3}' | grep -Fxq "$TARGET_DEB_VER"; then
+    if [ "$INSTALLED_DEB_VER" != "$TARGET_DEB_VER" ]; then
+      log " - Installing snapd=$TARGET_DEB_VER from APT"
+      apt-get update -y
+      apt-get install -y "snapd=$TARGET_DEB_VER" || true
+    else
+      log " - snapd deb already $TARGET_DEB_VER; leaving as-is"
+    fi
+    # Hold deb so it won't jump to 2.70.x automatically
+    apt-mark hold snapd >/dev/null 2>&1 || true
+    systemctl restart snapd || true
+  else
+    log " - Desired deb $TARGET_DEB_VER not available in APT; attempting snap-based fallback"
+    if command -v snap >/dev/null 2>&1; then
+      CUR_VER=$(snap list snapd 2>/dev/null | awk 'NR==2{print $2}')
+      CUR_REV=$(snap list snapd 2>/dev/null | awk 'NR==2{print $3}')
+      if [ "$CUR_VER" = "2.68.5" ]; then
+        log " - snapd snap already at 2.68.5 (rev $CUR_REV); holding"
+        snap refresh --hold snapd || true
+      else
+        TMPDIR=$(mktemp -d)
+        (cd "$TMPDIR" && snap download snapd --revision=24724) || true
+        if [ -f "$TMPDIR/snapd_24724.assert" ] && [ -f "$TMPDIR/snapd_24724.snap" ]; then
+          snap ack "$TMPDIR/snapd_24724.assert" || true
+          snap install "$TMPDIR/snapd_24724.snap" || true
+          snap refresh --hold snapd || true
+        else
+          log " - ERROR: Failed to fetch snapd revision 24724 artifacts" >&2
+        fi
+        rm -rf "$TMPDIR" || true
+      fi
+    else
+      log " - 'snap' command not found; cannot use snap fallback"
+    fi
+  fi
+else
+  log " - APT not available; skipping deb path"
+fi
+
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
   sleep 2
