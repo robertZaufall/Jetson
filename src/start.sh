@@ -7,13 +7,17 @@ for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
+    --vnc-backend=*) VNC_BACKEND="${arg#*=}" ;;
+    --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ;;
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--vnc-password=PASS] [--hostname=NAME] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
 log(){ printf '\n=== %s ===\n' "$*"; }
+VNC_BACKEND=${VNC_BACKEND:-grd}
+VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 
 resolve_user() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
@@ -208,58 +212,123 @@ BEGIN{in_d=0; se=0; su=0; sw=0}
 END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; if(!sw) print "WaylandEnable=false" } }
 ' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
 
-log "12) Reset GNOME keyring (so you can set empty password on next login)"
+log "12) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
-if [ -d "$KEYRINGS_DIR" ] && ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
+mkdir -p "$KEYRINGS_DIR"
+
+# Backup any existing keyrings once (timestamped)
+if ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
   TS=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="$HOME_DIR/.local/share/keyrings-backup-$TS"
   cp -a "$KEYRINGS_DIR" "$BACKUP_DIR" || true
   chown -R "$USERNAME":"$USERNAME" "$BACKUP_DIR" || true
 fi
-mkdir -p "$KEYRINGS_DIR"
-rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" "$KEYRINGS_DIR/"*.keyring 2>/dev/null || true
+
+# Define an unencrypted default keyring named "Default_keyring"
+DEFAULT_POINTER_FILE="$KEYRINGS_DIR/default"
+DEFAULT_RING_FILE="$KEYRINGS_DIR/Default_keyring.keyring"
+
+# Point the default file to our unencrypted keyring
+echo -n "Default_keyring" > "$DEFAULT_POINTER_FILE"
+
+# Create a minimal unencrypted keyring file (plaintext format)
+cat >"$DEFAULT_RING_FILE" <<'EOF'
+[keyring]
+display-name=Default keyring
+ctime=0
+mtime=0
+lock-on-idle=false
+lock-after=false
+EOF
+
+# Tighten permissions and ownership
+chmod 700 "$KEYRINGS_DIR" || true
+chmod 600 "$DEFAULT_RING_FILE" || true
 chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
+
+# Remove any leftover encrypted login keyring files that could trigger prompts
+rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" 2>/dev/null || true
+
 cat >/etc/issue.keyring-note <<'EOF'
-NOTE: The GNOME keyring was reset. On next login, if prompted to create a "Login" keyring,
-you can leave the password empty to avoid unlock prompts (stores secrets unencrypted).
+NOTE: Keyring configured for **unsafe storage**. A plaintext keyring was created and set as default,
+so GNOME will not prompt to set a keyring password. Secrets stored via libsecret/gnome-keyring are
+unencrypted on disk. Change this policy if you need encryption.
 EOF
 
 
-log "13) Legacy VNC server (x11vnc) with password"
-apt-get install -y x11vnc
-# Determine VNC password from env/CLI; default to 'jetson' if not provided
-: "${VNC_PASSWORD:=}"
-if [ -z "${VNC_PASSWORD}" ]; then
-  echo "VNC_PASSWORD not provided; using default password 'jetson'. Override with --vnc-password=PASS or VNC_PASSWORD env." >&2
-  VNC_PASSWORD='jetson'
-fi
-# Create/update the password file non-interactively (idempotent)
-echo "${VNC_PASSWORD}" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
-chmod 600 /etc/x11vnc.pass
-chown root:root /etc/x11vnc.pass
+if [ -n "${VNC_PASSWORD:-}" ]; then
+  log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
+  USER_UID=$(id -u "$USERNAME")
+  USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
 
-# Create/overwrite a systemd service for x11vnc (attaches to the display manager X11 session)
-cat >/etc/systemd/system/x11vnc.service <<'EOF'
+  if [ "${VNC_BACKEND}" = "grd" ]; then
+    # --- GNOME Remote Desktop (VNC) ---
+    apt-get install -y gnome-remote-desktop libsecret-tools || true
+
+    if command -v grdctl >/dev/null 2>&1; then
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASSWORD" || true
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
+        sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+      fi
+      loginctl enable-linger "$USERNAME" || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+    else
+      # Fallback to gsettings + secret-tool
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
+        sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+      fi
+      printf '%s' "$VNC_PASSWORD" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      loginctl enable-linger "$USERNAME" || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+    fi
+
+    # Avoid port conflicts with legacy x11vnc
+    systemctl disable --now x11vnc.service 2>/dev/null || true
+
+  else
+    # --- Legacy x11vnc backend (shares X11 :0) ---
+    apt-get install -y x11vnc || true
+
+    # Always (re)set password when provided
+    echo "$VNC_PASSWORD" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
+    chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
+
+    cat >/etc/systemd/system/x11vnc.service <<'EOF'
 [Unit]
 Description=Legacy VNC server for X11 (x11vnc)
 Requires=display-manager.service
-After=display-manager.service
+After=display-manager.service graphical.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/x11vnc -auth guess -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -display :0
-Restart=on-failure
+Environment=DISPLAY=:0
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 120); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/x11vnc -display :0 -auth guess -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=graphical.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now x11vnc.service || true
+    systemctl daemon-reload
+    systemctl enable --now x11vnc.service || true
 
-# Open VNC port on UFW if firewall is active
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow 5900/tcp || true
+    # Stop GNOME Remote Desktop to avoid port conflict
+    sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
+  fi
+
+  # Open firewall for VNC
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow 5900/tcp || true
+  fi
+else
+  log "13) VNC setup skipped (no --vnc-password provided)"
 fi
 
 log "14) Rename device (hostname) if requested"
