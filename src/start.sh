@@ -7,7 +7,9 @@ for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
-    --help|-h) echo "Usage: $0 [--reboot] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
+    --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--vnc-password=PASS] [--hostname=NAME] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
@@ -31,6 +33,14 @@ systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
 log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
+# Ensure the dconf user profile reads system 'local' DB (required for defaults to apply)
+install -d -m 0755 /etc/dconf/profile
+if [ ! -f /etc/dconf/profile/user ] || ! grep -Pq '^\s*user-db:user' /etc/dconf/profile/user || ! grep -Pq '^\s*system-db:local' /etc/dconf/profile/user; then
+  cat >/etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+fi
 install -d -m 0755 /etc/dconf/db/local.d
 cat >/etc/dconf/db/local.d/00-nosleep <<'EOF'
 [org/gnome/desktop/session]
@@ -184,17 +194,18 @@ install -d -m 0755 /etc/gdm3
 touch "$GDM_CONF"
 grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
 awk -v user="$USERNAME" '
-BEGIN{in_d=0; se=0; su=0}
+BEGIN{in_d=0; se=0; su=0; sw=0}
 {
   if ($0 ~ /^\[daemon\]/){in_d=1; print; next}
-  if (in_d && $0 ~ /^\[/){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; in_d=0 }
+  if (in_d && $0 ~ /^\[/){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; if(!sw) print "WaylandEnable=false"; in_d=0 }
   if (in_d){
     if ($0 ~ /^[#[:space:]]*AutomaticLoginEnable[[:space:]]*=/){print "AutomaticLoginEnable=true"; se=1; next}
     if ($0 ~ /^[#[:space:]]*AutomaticLogin[[:space:]]*=/){print "AutomaticLogin=" user; su=1; next}
+    if ($0 ~ /^[#[:space:]]*WaylandEnable[[:space:]]*=/){print "WaylandEnable=false"; sw=1; next}
   }
   print
 }
-END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user } }
+END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; if(!sw) print "WaylandEnable=false" } }
 ' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
 
 log "12) Reset GNOME keyring (so you can set empty password on next login)"
@@ -212,6 +223,71 @@ cat >/etc/issue.keyring-note <<'EOF'
 NOTE: The GNOME keyring was reset. On next login, if prompted to create a "Login" keyring,
 you can leave the password empty to avoid unlock prompts (stores secrets unencrypted).
 EOF
+
+
+log "13) Legacy VNC server (x11vnc) with password"
+apt-get install -y x11vnc
+# Determine VNC password from env/CLI; default to 'jetson' if not provided
+: "${VNC_PASSWORD:=}"
+if [ -z "${VNC_PASSWORD}" ]; then
+  echo "VNC_PASSWORD not provided; using default password 'jetson'. Override with --vnc-password=PASS or VNC_PASSWORD env." >&2
+  VNC_PASSWORD='jetson'
+fi
+# Create/update the password file non-interactively (idempotent)
+echo "${VNC_PASSWORD}" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
+chmod 600 /etc/x11vnc.pass
+chown root:root /etc/x11vnc.pass
+
+# Create/overwrite a systemd service for x11vnc (attaches to the display manager X11 session)
+cat >/etc/systemd/system/x11vnc.service <<'EOF'
+[Unit]
+Description=Legacy VNC server for X11 (x11vnc)
+Requires=display-manager.service
+After=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/x11vnc -auth guess -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -display :0
+Restart=on-failure
+
+[Install]
+WantedBy=graphical.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now x11vnc.service || true
+
+# Open VNC port on UFW if firewall is active
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 5900/tcp || true
+fi
+
+log "14) Rename device (hostname) if requested"
+if [ -n "${NEW_HOSTNAME:-}" ]; then
+  # Validate hostname (RFC 1123 label rules: letters/digits/hyphen; max 63 per label)
+  if ! echo "$NEW_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'; then
+    echo "ERROR: --hostname must be a valid RFC1123 hostname (letters, digits, hyphens; labels 1-63 chars; cannot start/end with hyphen)." >&2
+    exit 1
+  fi
+
+  log " - Setting hostname via hostnamectl to '$NEW_HOSTNAME'"
+  hostnamectl set-hostname "$NEW_HOSTNAME" || { echo "ERROR: failed to set hostname" >&2; exit 1; }
+
+  # Update /etc/hosts mapping on the 127.0.1.1 line (Ubuntu/Debian convention)
+  short_name="${NEW_HOSTNAME%%.*}"
+  hosts_line="127.0.1.1 ${NEW_HOSTNAME}"
+  if [ "$short_name" != "$NEW_HOSTNAME" ]; then
+    hosts_line="${hosts_line} ${short_name}"
+  fi
+
+  if grep -qE '^127\.0\.1\.1\b' /etc/hosts; then
+    sed -i -E "s/^127\\.0\\.1\\.1\s+.*/${hosts_line//\//\/}/" /etc/hosts
+  else
+    printf '%s\n' "$hosts_line" >> /etc/hosts
+  fi
+
+  log " - Hostname set. New /etc/hosts entry: $(grep -E '^127\.0\.1\.1\b' /etc/hosts || true)"
+fi
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
