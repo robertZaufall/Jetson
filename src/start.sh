@@ -361,8 +361,17 @@ if [ -n "${NEW_HOSTNAME:-}" ]; then
   log " - Hostname set. New /etc/hosts entry: $(grep -E '^127\.0\.1\.1\b' /etc/hosts || true)"
 fi
 
+log "15) Disable zram (nvzramconfig)"
+if systemctl is-enabled nvzramconfig >/dev/null 2>&1; then
+  systemctl disable nvzramconfig || true
+  systemctl stop nvzramconfig || true
+  log " - zram (nvzramconfig) disabled."
+else
+  log " - zram already disabled; skipping."
+fi
 
-log "15) Install jetson-stats (jtop) and patch version mapping"
+
+log "16) Install jetson-stats (jtop) and patch version mapping"
 apt-get install -y python3-pip
 pip3 install -U jetson-stats
 systemctl daemon-reload || true
@@ -388,7 +397,7 @@ if [ -f "$JTOP_VARS_FILE" ]; then
 fi
 systemctl restart jtop.service || true
 
-log "16) Ensure swapfile size is $SWAP_SIZE (default 8G)"
+log "17) Ensure swapfile size is $SWAP_SIZE (default 8G)"
 to_bytes() {
   local s="$1"
   if command -v numfmt >/dev/null 2>&1; then
@@ -430,7 +439,7 @@ else
   fi
 fi
 
-log "17) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
+log "18) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
 # Ensure user's global LFS hooks/config are installed (per-user), independent of repo
 if command -v git >/dev/null 2>&1; then
   sudo -u "$USERNAME" git lfs install --skip-repo >/dev/null 2>&1 || true
@@ -454,6 +463,82 @@ if command -v git >/dev/null 2>&1; then
       sudo -u "$USERNAME" git config --global --add safe.directory "$repo" || true
     fi
   done < <(find "$HOME_DIR" -type d -name .git -prune -print0 2>/dev/null)
+fi
+
+log "19) Set Jetson power mode to MAXN (nvpmodel)"
+if command -v nvpmodel >/dev/null 2>&1; then
+  if nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+    log " - Power mode already MAXN; skipping."
+  else
+    for id in 0 1 2 3 4 5 6 7 8 9; do
+      if nvpmodel -m "$id" >/dev/null 2>&1; then
+        sleep 1
+        if nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+          log " - Set power mode to MAXN via nvpmodel -m $id"
+          break
+        fi
+      fi
+    done
+    if ! nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+      log " - WARNING: Could not set MAXN automatically. Available modes:"
+      nvpmodel -q 2>/dev/null || true
+      log "   You may need to check /etc/nvpmodel.conf for mode numbers."
+    fi
+  fi
+else
+  log " - nvpmodel not found; skipping."
+fi
+
+log "20) Install Docker Engine and plugins (if missing)"
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get install -y ca-certificates curl gnupg
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+tee /etc/apt/sources.list.d/docker.list > /dev/null
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+else
+  log " - Docker already installed; ensuring plugins present"
+  apt-get install -y docker-buildx-plugin docker-compose-plugin || true
+fi
+
+log "21) Configure Docker default runtime to NVIDIA (if available)"
+mkdir -p /etc/docker
+DAEMON_JSON=/etc/docker/daemon.json
+if command -v nvidia-ctk >/dev/null 2>&1; then
+  nvidia-ctk runtime configure --runtime=docker --config=$DAEMON_JSON || true
+  if ! grep -q '"default-runtime"[[:space:]]*:[[:space:]]*"nvidia"' "$DAEMON_JSON" 2>/dev/null; then
+    tmp=$(mktemp)
+    if grep -q '"runtimes"' "$DAEMON_JSON" 2>/dev/null; then
+      # Insert default-runtime near the beginning if not present
+      sed -E 's/\{[[:space:]]*/{\n  "default-runtime": "nvidia",\n/' "$DAEMON_JSON" > "$tmp" || cp "$DAEMON_JSON" "$tmp"
+    else
+      printf '{\n  "runtimes": { "nvidia": { "path": "nvidia-container-runtime", "runtimeArgs": [] } },\n  "default-runtime": "nvidia"\n}\n' > "$tmp"
+    fi
+    cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" 2>/dev/null || true
+    mv "$tmp" "$DAEMON_JSON"
+  fi
+else
+  if ! grep -q '"default-runtime"[[:space:]]*:[[:space:]]*"nvidia"' "$DAEMON_JSON" 2>/dev/null; then
+    cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" 2>/dev/null || true
+    printf '{\n  "runtimes": { "nvidia": { "path": "nvidia-container-runtime", "runtimeArgs": [] } },\n  "default-runtime": "nvidia"\n}\n' > "$DAEMON_JSON"
+  fi
+fi
+systemctl restart docker || true
+
+log "22) Ensure $USERNAME is in 'docker' group"
+if ! getent group docker >/dev/null; then
+  groupadd docker || true
+fi
+if id -nG "$USERNAME" | tr ' ' '\n' | grep -qx docker; then
+  log " - $USERNAME already in docker group; skipping."
+else
+  usermod -aG docker "$USERNAME" || true
+  log " - Added $USERNAME to docker group. You may need to log out/in for group changes to take effect."
 fi
 
 if [ "$REBOOT" -eq 1 ]; then
