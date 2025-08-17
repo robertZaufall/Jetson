@@ -1,61 +1,36 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-# ---------- options ----------
 REBOOT=${REBOOT:-0}
-# parse args (simple)
 for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
-    --help|-h) echo "Usage: $0 [--reboot]"; exit 0 ;;
-    *) ;; # ignore unknown
+    --help|-h) echo "Usage: $0 [--reboot] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
 log(){ printf '\n=== %s ===\n' "$*"; }
 
-# ---------- figure out target non-root user ----------
 resolve_user() {
-  # prefer the invoking sudo user, else any real user (uid>=1000)
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-    printf '%s' "$SUDO_USER"; return
-  fi
-  # try logname
-  if logname >/dev/null 2>&1; then
-    ln=$(logname 2>/dev/null || true)
-    if [ -n "$ln" ] && [ "$ln" != "root" ]; then
-      printf '%s' "$ln"; return
-    fi
-  fi
-  # fallback: first non-system user in /etc/passwd
-  awk -F: '$3>=1000 && $1!="nobody" { print $1; exit }' /etc/passwd
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
+  if logname >/dev/null 2>&1; then ln=$(logname 2>/dev/null || true); [ -n "$ln" ] && [ "$ln" != "root" ] && { printf '%s' "$ln"; return; }; fi
+  awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd
 }
 USERNAME="$(resolve_user)"
-if [ -z "$USERNAME" ]; then
-  echo "ERROR: could not resolve a non-root user. Run this script with sudo from your user account." >&2
-  exit 1
-fi
+[ -n "$USERNAME" ] || { echo "ERROR: could not resolve a non-root user." >&2; exit 1; }
 HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
+log "Target user: $USERNAME ($HOME_DIR)"
 
-log "Target user: $USERNAME (home: $HOME_DIR)"
-
-# ---------- 1) install openssh + dconf ----------
-log "1) Install OpenSSH and dconf-cli"
+log "1) Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y openssh-server dconf-cli
-
 systemctl enable --now ssh || true
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
-# open firewall for SSH if ufw active
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow OpenSSH || true
-fi
-
-# ---------- 2) GNOME system-wide: disable idle/lock/suspend (dconf) ----------
-# Use /etc/dconf/db/local.d and locks so it is system-wide and idempotent.
-log "2) Apply system-wide GNOME dconf defaults (disable idle/lock/suspend)"
+log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
 install -d -m 0755 /etc/dconf/db/local.d
 cat >/etc/dconf/db/local.d/00-nosleep <<'EOF'
 [org/gnome/desktop/session]
@@ -72,7 +47,6 @@ sleep-inactive-battery-type='nothing'
 sleep-inactive-battery-timeout=0
 idle-dim=false
 EOF
-
 install -d -m 0755 /etc/dconf/db/local.d/locks
 cat >/etc/dconf/db/local.d/locks/00-nosleep-locks <<'EOF'
 /org/gnome/desktop/session/idle-delay
@@ -84,19 +58,15 @@ cat >/etc/dconf/db/local.d/locks/00-nosleep-locks <<'EOF'
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
 /org/gnome/settings-daemon/plugins/power/idle-dim
 EOF
-
-# compile/update dconf DB
 dconf update || true
 
-# ---------- 3) GDM greeter (login screen) dconf ----------
-log "3) Prevent GDM greeter from blanking/suspending"
+log "3) GDM greeter: prevent idle/suspend"
 install -d -m 0755 /etc/dconf/profile
 cat >/etc/dconf/profile/gdm <<'EOF'
 user-db:user
 system-db:gdm
 file-db:/usr/share/gdm/greeter-dconf-defaults
 EOF
-
 install -d -m 0755 /etc/dconf/db/gdm.d
 cat >/etc/dconf/db/gdm.d/00-nosleep <<'EOF'
 [org/gnome/desktop/session]
@@ -107,18 +77,52 @@ sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 idle-dim=false
 EOF
-
 dconf update || true
 
-# ---------- 4) mask systemd sleep targets ----------
-log "4) Mask systemd sleep targets (prevent suspend/hibernate)"
+log "4) X11 PERMANENT: disable DPMS & blanking at the Xorg level"
+install -d -m 0755 /etc/X11/xorg.conf.d
+cat >/etc/X11/xorg.conf.d/10-extensions.conf <<'EOF'
+Section "Extensions"
+    Option "DPMS" "false"
+EndSection
+EOF
+cat >/etc/X11/xorg.conf.d/10-serverflags.conf <<'EOF'
+Section "ServerFlags"
+    Option "BlankTime" "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime" "0"
+EndSection
+EOF
+
+log "5) X11 PERMANENT: user-session fallback to enforce no-blank via xset"
+cat >/usr/local/bin/disable-dpms-x11 <<'EOF'
+#!/bin/sh
+# Run only for X11 sessions
+[ "$XDG_SESSION_TYPE" = "x11" ] || exit 0
+# Disable X screensaver and DPMS in the running session
+command -v xset >/dev/null 2>&1 || exit 0
+xset s off
+xset s noblank
+xset -dpms
+exit 0
+EOF
+chmod +x /usr/local/bin/disable-dpms-x11
+install -d -m 0755 /etc/xdg/autostart
+cat >/etc/xdg/autostart/99-x11-noblank.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Disable X11 screen blanking
+Exec=/usr/local/bin/disable-dpms-x11
+X-GNOME-Autostart-enabled=true
+EOF
+
+log "6) Block suspend/hibernate at systemd level"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target || true
 
-# ---------- 5) make logind ignore lid/power keys ----------
-log "5) Configure systemd-logind to ignore lid/suspend keys"
+log "7) systemd-logind: ignore lid/suspend keys"
 conf=/etc/systemd/logind.conf
 touch "$conf"
-# replace or append values idempotently
 sed -i \
   -e 's/^[#[:space:]]*HandleSuspendKey=.*/HandleSuspendKey=ignore/' \
   -e 's/^[#[:space:]]*HandleHibernateKey=.*/HandleHibernateKey=ignore/' \
@@ -129,8 +133,7 @@ sed -i \
 grep -q '^IdleAction=ignore' "$conf" || echo 'IdleAction=ignore' >>"$conf"
 systemctl restart systemd-logind || true
 
-# ---------- 6) Disable console (TTY) blanking ----------
-log "6) Disable TTY console blanking (systemd oneshot service)"
+log "8) Disable TTY (virtual console) blanking"
 cat >/etc/systemd/system/disable-console-blanking.service <<'EOF'
 [Unit]
 Description=Disable TTY console blanking
@@ -146,36 +149,25 @@ EOF
 systemctl daemon-reload
 systemctl enable --now disable-console-blanking.service || true
 
-# ---------- 7) Disable Wi-Fi powersave (NetworkManager) ----------
-log "7) Disable Wi-Fi power save (NetworkManager drop-in)"
+log "9) Disable Wi-Fi powersave (NetworkManager)"
 install -d -m 0755 /etc/NetworkManager/conf.d
 cat >/etc/NetworkManager/conf.d/00-wifi-powersave-off.conf <<'EOF'
 [connection]
-# 2 = disable Wi-Fi power saving
 wifi.powersave=2
 EOF
-
 if systemctl is-active --quiet NetworkManager 2>/dev/null || systemctl is-enabled --quiet NetworkManager 2>/dev/null; then
   systemctl restart NetworkManager || true
 fi
 
-# ---------- 8) Optional: key-only SSH if SSH_KEY_PATH provided ----------
+log "10) Optional: key-only SSH (if SSH_KEY_PATH provided)"
 if [ "${SSH_KEY_PATH:-}" != "" ] && [ -f "${SSH_KEY_PATH}" ]; then
-  log "8) Install SSH public key for $USERNAME (idempotent)"
-  AUTH_DIR="$HOME_DIR/.ssh"
-  AUTH_FILE="$AUTH_DIR/authorized_keys"
+  AUTH_DIR="$HOME_DIR/.ssh"; AUTH_FILE="$AUTH_DIR/authorized_keys"
   install -d -m 0700 -o "$USERNAME" -g "$USERNAME" "$AUTH_DIR"
-  touch "$AUTH_FILE"
-  chown "$USERNAME":"$USERNAME" "$AUTH_FILE"
-  chmod 600 "$AUTH_FILE"
+  touch "$AUTH_FILE"; chown "$USERNAME":"$USERNAME" "$AUTH_FILE"; chmod 600 "$AUTH_FILE"
   KEY_CONTENT="$(cat "$SSH_KEY_PATH")"
-  if ! grep -qxF "$KEY_CONTENT" "$AUTH_FILE"; then
-    echo "$KEY_CONTENT" >>"$AUTH_FILE"
-  fi
-
+  grep -qxF "$KEY_CONTENT" "$AUTH_FILE" || echo "$KEY_CONTENT" >>"$AUTH_FILE"
   install -d /etc/ssh/sshd_config.d
   cat >/etc/ssh/sshd_config.d/90-key-only.conf <<'EOF'
-# Enforce public-key auth only
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -186,43 +178,26 @@ EOF
   systemctl reload ssh || true
 fi
 
-# ---------- 9) Enable GDM automatic login for the resolved user ----------
-log "9) Enable GDM automatic login for user: $USERNAME"
+log "11) Enable GDM auto-login for user: $USERNAME"
 GDM_CONF="/etc/gdm3/custom.conf"
 install -d -m 0755 /etc/gdm3
-# Ensure file exists
 touch "$GDM_CONF"
-
-# Ensure a [daemon] section exists
-if ! grep -q '^\[daemon\]' "$GDM_CONF"; then
-  printf '\n[daemon]\n' >>"$GDM_CONF"
-fi
-
-# Replace or insert AutomaticLoginEnable and AutomaticLogin inside [daemon]
+grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
 awk -v user="$USERNAME" '
-BEGIN{in_d=0; set_enable=0; set_user=0}
+BEGIN{in_d=0; se=0; su=0}
 {
-  if ($0 ~ /^\[daemon\]/) { print; in_d=1; next }
-  if (in_d && $0 ~ /^\[/) { # leaving [daemon]
-     if (!set_enable) print "AutomaticLoginEnable=true"
-     if (!set_user) print "AutomaticLogin=" user
-     in_d=0
-  }
-  if (in_d) {
-     if ($0 ~ /^[[:space:]]*AutomaticLoginEnable[[:space:]]*=/) { print "AutomaticLoginEnable=true"; set_enable=1; next }
-     if ($0 ~ /^[[:space:]]*AutomaticLogin[[:space:]]*=/) { print "AutomaticLogin=" user; set_user=1; next }
+  if ($0 ~ /^\[daemon\]/){in_d=1; print; next}
+  if (in_d && $0 ~ /^\[/){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; in_d=0 }
+  if (in_d){
+    if ($0 ~ /^[#[:space:]]*AutomaticLoginEnable[[:space:]]*=/){print "AutomaticLoginEnable=true"; se=1; next}
+    if ($0 ~ /^[#[:space:]]*AutomaticLogin[[:space:]]*=/){print "AutomaticLogin=" user; su=1; next}
   }
   print
 }
-END {
-  if (in_d) {
-    if (!set_enable) print "AutomaticLoginEnable=true"
-    if (!set_user) print "AutomaticLogin=" ENVIRON["USERNAME"]
-  }
-}' USERNAME="$USERNAME" "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF" || true
+END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user } }
+' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
 
-# ---------- 10) Reset GNOME keyring (remove login keyring) ----------
-log "10) Reset GNOME keyring for $USERNAME (removes ~/.local/share/keyrings/login.keyring)"
+log "12) Reset GNOME keyring (so you can set empty password on next login)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
 if [ -d "$KEYRINGS_DIR" ] && ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
   TS=$(date +%Y%m%d-%H%M%S)
@@ -231,24 +206,19 @@ if [ -d "$KEYRINGS_DIR" ] && ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
   chown -R "$USERNAME":"$USERNAME" "$BACKUP_DIR" || true
 fi
 mkdir -p "$KEYRINGS_DIR"
-# Remove the typical keyring files that cause the login prompt; safe to repeat
-rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" "$KEYRINGS_DIR/*.keyring" || true
+rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" "$KEYRINGS_DIR/"*.keyring 2>/dev/null || true
 chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
-
 cat >/etc/issue.keyring-note <<'EOF'
-NOTE: The GNOME keyring was reset. On next login, if a prompt asks to create a "Login" keyring,
-leave the password blank if you want it to unlock automatically with auto-login (this stores
-secrets unencrypted). See your security policy before doing so.
+NOTE: The GNOME keyring was reset. On next login, if prompted to create a "Login" keyring,
+you can leave the password empty to avoid unlock prompts (stores secrets unencrypted).
 EOF
 
-# ---------- final: reboot optionally ----------
 if [ "$REBOOT" -eq 1 ]; then
-  log "Final: reboot requested. Rebooting now..."
+  log "Final: rebooting now to apply Xorg changes…"
   sleep 2
   systemctl reboot
 else
-  log "Final: reboot NOT requested. To apply some changes (GDM/dconf) please log out and back in, or reboot manually."
-  echo "If you'd like to reboot now: sudo systemctl reboot"
+  log "Final: reboot NOT requested."
+  echo "Xorg drop-ins take effect after a restart of the display server; a full reboot is simplest."
+  echo "Reboot later with: sudo systemctl reboot"
 fi
-
-exit 0
