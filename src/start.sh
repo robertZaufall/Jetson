@@ -430,6 +430,32 @@ else
   fi
 fi
 
+log "17) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
+# Ensure user's global LFS hooks/config are installed (per-user), independent of repo
+if command -v git >/dev/null 2>&1; then
+  sudo -u "$USERNAME" git lfs install --skip-repo >/dev/null 2>&1 || true
+
+  # Iterate over all .git directories in the user's home and fix permissions for .git and .git/lfs
+  while IFS= read -r -d '' gitdir; do
+    repo="${gitdir%/.git}"
+
+    # Fix ownership of the Git metadata to the actual user
+    chown -R "$USERNAME":"$USERNAME" "$gitdir" 2>/dev/null || true
+
+    # Fix LFS cache/objects/locks directories if present
+    if [ -d "$gitdir/lfs" ]; then
+      chown -R "$USERNAME":"$USERNAME" "$gitdir/lfs" 2>/dev/null || true
+      find "$gitdir/lfs" -type d -exec chmod u+rwx,go-rwx {} + 2>/dev/null || true
+      find "$gitdir/lfs" -type f -exec chmod u+rw,go-rwx {} + 2>/dev/null || true
+    fi
+
+    # Mark repository as safe for the user to avoid "dubious ownership" issues if history of root edits exists
+    if ! sudo -u "$USERNAME" git config --global --get-all safe.directory | grep -Fxq "$repo" 2>/dev/null; then
+      sudo -u "$USERNAME" git config --global --add safe.directory "$repo" || true
+    fi
+  done < <(find "$HOME_DIR" -type d -name .git -prune -print0 2>/dev/null)
+fi
+
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
   sleep 2
