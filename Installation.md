@@ -54,7 +54,7 @@ See also https://github.com/jetsonhacks/jetson-orin-setup
 ### Basic tools
 Basic tools installation
 ```
-sudo apt install nano btop curl chromium-browser git-lfs -y
+sudo apt install nano btop curl git-lfs -y
 # usage: git lfs install
 ```
 ### jtop
