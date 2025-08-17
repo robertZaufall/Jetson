@@ -11,13 +11,15 @@ for arg in "$@"; do
     --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ;;
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
 log(){ printf '\n=== %s ===\n' "$*"; }
 VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
+SWAP_SIZE=${SWAP_SIZE:-8G}
 
 resolve_user() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
@@ -32,7 +34,8 @@ log "Target user: $USERNAME ($HOME_DIR)"
 log "1) Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y openssh-server dconf-cli
+apt-get install -y openssh-server dconf-cli nano btop curl git-lfs
+git lfs install --system || true
 systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
@@ -356,6 +359,75 @@ if [ -n "${NEW_HOSTNAME:-}" ]; then
   fi
 
   log " - Hostname set. New /etc/hosts entry: $(grep -E '^127\.0\.1\.1\b' /etc/hosts || true)"
+fi
+
+
+log "15) Install jetson-stats (jtop) and patch version mapping"
+apt-get install -y python3-pip
+pip3 install -U jetson-stats
+systemctl daemon-reload || true
+systemctl restart jtop.service || true
+
+# Patch jetson-stats to map L4T 36.4.4 -> JetPack 6.2.1
+JTOP_VARS_FILE=$(python3 - <<'PY'
+import os
+try:
+    import jtop.core.jetson_variables as v
+    print(os.path.abspath(v.__file__))
+except Exception:
+    pass
+PY
+)
+if [ -z "$JTOP_VARS_FILE" ]; then
+  JTOP_VARS_FILE="/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py"
+fi
+if [ -f "$JTOP_VARS_FILE" ]; then
+  if ! grep -q '"36.4.4": "6.2.1",' "$JTOP_VARS_FILE"; then
+    sed -i -E '0,/"36\.4\.3": "6\.2",/s//"36.4.4": "6.2.1",\n    "36.4.3": "6.2",/' "$JTOP_VARS_FILE" || true
+  fi
+fi
+systemctl restart jtop.service || true
+
+log "16) Ensure swapfile size is $SWAP_SIZE (default 8G)"
+to_bytes() {
+  local s="$1"
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --from=iec "$s" 2>/dev/null && return 0
+  fi
+  case "$s" in
+    *[Gg]*) echo $(( ${s%[Gg]*} * 1073741824 ));;
+    *[Mm]*) echo $(( ${s%[Mm]*} * 1048576 ));;
+    *[Kk]*) echo $(( ${s%[Kk]*} * 1024 ));;
+    *) echo "$s";;
+  esac
+}
+DESIRED_BYTES=$(to_bytes "$SWAP_SIZE")
+if [ -z "$DESIRED_BYTES" ] || [ "$DESIRED_BYTES" -le 0 ]; then
+  DESIRED_BYTES=$((8*1024*1024*1024))
+fi
+
+CURRENT_BYTES=0
+[ -f /swapfile ] && CURRENT_BYTES=$(stat -c %s /swapfile 2>/dev/null || echo 0)
+
+if [ "$CURRENT_BYTES" -eq "$DESIRED_BYTES" ]; then
+  log " - Existing /swapfile already $SWAP_SIZE; leaving as-is."
+else
+  log " - (Re)creating /swapfile to $SWAP_SIZE"
+  swapoff /swapfile 2>/dev/null || true
+  rm -f /swapfile
+  if fallocate -l "$DESIRED_BYTES" /swapfile 2>/dev/null; then
+    :
+  else
+    dd if=/dev/zero of=/swapfile bs=1M count=$((DESIRED_BYTES/1048576)) status=none || true
+  fi
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  if grep -qE '^/swapfile\b' /etc/fstab; then
+    sed -i -E 's#^/swapfile\s+.*#/swapfile none swap sw 0 0#' /etc/fstab
+  else
+    printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+  fi
 fi
 
 if [ "$REBOOT" -eq 1 ]; then
