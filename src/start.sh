@@ -267,13 +267,15 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
   if [ "${VNC_BACKEND}" = "grd" ]; then
     # --- GNOME Remote Desktop (VNC) ---
     apt-get install -y gnome-remote-desktop libsecret-tools || true
+    # VNC implementations commonly use the first 8 chars; keep it consistent across grdctl and keyring
+    VNC_PASS8="${VNC_PASSWORD:0:8}"
 
     if command -v grdctl >/dev/null 2>&1; then
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASSWORD" || true
-      printf '%s' "$VNC_PASSWORD" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
+      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
@@ -285,7 +287,7 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
-      printf '%s' "$VNC_PASSWORD" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
     fi
 
@@ -299,6 +301,39 @@ EOC
     sudo -u "$USERNAME" systemctl --user daemon-reload || true
     sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service || true
 
+    # Create a user service to (re)seed the VNC password after session & keyring are up
+    sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user"
+    sudo -u "$USERNAME" tee "$HOME_DIR/.config/systemd/user/grd-ensure-vnc-pass.service" >/dev/null <<'EOUNIT'
+[Unit]
+Description=Ensure GNOME Remote Desktop VNC password is set
+After=gnome-keyring-daemon.service graphical-session.target
+Wants=gnome-keyring-daemon.service
+
+[Service]
+Type=oneshot
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+ExecStart=/bin/sh -lc '
+  PASS_FILE="$HOME/.config/gnome-remote-desktop.vncpass";
+  [ -f "$PASS_FILE" ] || exit 0;
+  PASS=$(head -n1 "$PASS_FILE");
+  [ -n "$PASS" ] || exit 0;
+  echo -n "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword;
+  grdctl vnc set-auth-method password || true;
+  grdctl vnc disable-view-only || true;
+  grdctl vnc enable || true;
+  grdctl vnc set-password "$PASS" || true;
+  systemctl --user restart gnome-remote-desktop.service || true;
+'
+EOUNIT
+    sudo -u "$USERNAME" systemctl --user daemon-reload || true
+
+    # Persist the chosen password to the user's config for the ensure service (permissions 600)
+    sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config"
+    sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" "'"$VNC_PASS8"'" > "$HOME/.config/gnome-remote-desktop.vncpass"'
+
+    # Enable the ensure service to run at each login
+    sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service || true
+
     # If linger was enabled earlier, it can start the service too early (before keyring). Disable it to avoid random password regeneration.
     if loginctl show-user "$USERNAME" -p Linger 2>/dev/null | grep -q '=yes'; then
       loginctl disable-linger "$USERNAME" || true
@@ -307,15 +342,15 @@ EOC
     # Avoid port conflicts with legacy x11vnc
     systemctl disable --now x11vnc.service 2>/dev/null || true
 
-  else
-    # --- Legacy x11vnc backend (shares X11 :0) ---
-    apt-get install -y x11vnc || true
+    else
+      # --- Legacy x11vnc backend (shares X11 :0) ---
+      apt-get install -y x11vnc || true
 
-    # Always (re)set password when provided
-    echo "$VNC_PASSWORD" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
-    chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
+      # Always (re)set password when provided
+      echo "$VNC_PASSWORD" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
+      chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
 
-    cat >/etc/systemd/system/x11vnc.service <<'EOF'
+      cat >/etc/systemd/system/x11vnc.service <<'EOF'
 [Unit]
 Description=Legacy VNC server for X11 (x11vnc)
 Requires=display-manager.service
@@ -333,12 +368,12 @@ RestartSec=2
 WantedBy=graphical.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable --now x11vnc.service || true
+      systemctl daemon-reload
+      systemctl enable --now x11vnc.service || true
 
-    # Stop GNOME Remote Desktop to avoid port conflict
-    sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
-  fi
+      # Stop GNOME Remote Desktop to avoid port conflict
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
+    fi
 
   # Open firewall for VNC
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -598,6 +633,65 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
 else
   log " - APT not available; skipping deb path"
+fi
+
+log "24) Remove preinstalled games (apt & snap)"
+
+# APT packages commonly pulled in by Ubuntu/Jetson images
+# (GNOME games, see: aisleriot, gnome-mines, gnome-mahjongg, gnome-sudoku, gnome-chess,
+#  gnome-robots, gnome-klotski, gnome-taquin, tali, four-in-a-row, hitori, gnome-nibbles,
+#  and the meta packages gnome-games and gnome-games-app)
+APT_GAMES=(
+  gnome-games
+  gnome-games-app
+  aisleriot
+  gnome-mines
+  gnome-mahjongg
+  gnome-sudoku
+  gnome-chess
+  gnome-robots
+  gnome-klotski
+  gnome-taquin
+  tali
+  four-in-a-row
+  hitori
+  gnome-nibbles
+)
+
+TO_PURGE=()
+for p in "${APT_GAMES[@]}"; do
+  dpkg -s "$p" >/dev/null 2>&1 && TO_PURGE+=("$p") || true
+done
+
+if [ ${#TO_PURGE[@]} -gt 0 ]; then
+  log " - Purging APT games: ${TO_PURGE[*]}"
+  apt-get purge -y "${TO_PURGE[@]}" || true
+  apt-get autoremove -y || true
+else
+  log " - No listed APT games installed; skipping purge"
+fi
+
+# Remove snap-installed GNOME games if present
+if command -v snap >/dev/null 2>&1; then
+  SNAP_GAMES=(
+    gnome-2048
+    gnome-chess
+    gnome-mines
+    gnome-sudoku
+    gnome-mahjongg
+    gnome-nibbles
+    gnome-klotski
+    gnome-taquin
+    tali
+  )
+  for s in "${SNAP_GAMES[@]}"; do
+    if snap list "$s" >/dev/null 2>&1; then
+      log " - Removing snap: $s"
+      snap remove --purge "$s" || true
+    fi
+  done
+else
+  log " - snap not installed; skipping snap game removal"
 fi
 
 if [ "$REBOOT" -eq 1 ]; then
