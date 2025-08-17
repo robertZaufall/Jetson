@@ -273,10 +273,10 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASSWORD" || true
+      printf '%s' "$VNC_PASSWORD" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
-      loginctl enable-linger "$USERNAME" || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
     else
       # Fallback to gsettings + secret-tool
@@ -286,8 +286,22 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
         sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       printf '%s' "$VNC_PASSWORD" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      loginctl enable-linger "$USERNAME" || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+    fi
+
+    # Ensure gnome-remote-desktop starts after the keyring is available (prevents password reset on boot)
+    sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user/gnome-remote-desktop.service.d"
+    sudo -u "$USERNAME" tee "$HOME_DIR/.config/systemd/user/gnome-remote-desktop.service.d/override.conf" >/dev/null <<'EOC'
+[Unit]
+After=gnome-keyring-daemon.service graphical-session.target
+Wants=gnome-keyring-daemon.service
+EOC
+    sudo -u "$USERNAME" systemctl --user daemon-reload || true
+    sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service || true
+
+    # If linger was enabled earlier, it can start the service too early (before keyring). Disable it to avoid random password regeneration.
+    if loginctl show-user "$USERNAME" -p Linger 2>/dev/null | grep -q '=yes'; then
+      loginctl disable-linger "$USERNAME" || true
     fi
 
     # Avoid port conflicts with legacy x11vnc
