@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[1/7] Install & enable OpenSSH server…"
+log() { printf '\n=== %s ===\n' "$*"; }
+
+log "[1/8] Install OpenSSH server + dconf tools"
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y openssh-server dconf-cli
 systemctl enable --now ssh
 
-# If UFW is installed and active, open SSH.
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  ufw allow OpenSSH || true
+# If UFW is installed and active, allow OpenSSH (safe to repeat)
+if command -v ufw >/dev/null 2>&1; then
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow OpenSSH || true
+  fi
 fi
 
-echo "[2/7] Disable desktop screen blanking, lock & auto-suspend (system-wide defaults)…"
+log "[2/8] System-wide GNOME defaults: disable idle/lock/suspend"
 install -d -m 0755 /etc/dconf/db/local.d
 cat >/etc/dconf/db/local.d/00-nosleep <<'EOF'
 [org/gnome/desktop/session]
+# 0 means "never" — must include uint32
 idle-delay=uint32 0
 
 [org/gnome/desktop/screensaver]
@@ -29,17 +35,22 @@ sleep-inactive-battery-timeout=0
 idle-dim=false
 EOF
 
+# Lock key settings so per-user changes can't override them (optional but useful)
 install -d -m 0755 /etc/dconf/db/local.d/locks
 cat >/etc/dconf/db/local.d/locks/00-nosleep-locks <<'EOF'
 /org/gnome/desktop/session/idle-delay
 /org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/idle-activation-enabled
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
+/org/gnome/settings-daemon/plugins/power/idle-dim
 EOF
 
 dconf update
 
-echo "[3/7] Disable blanking/suspend on the GDM login screen…"
+log "[3/8] GDM (login screen) settings: disable blanking/suspend"
 install -d -m 0755 /etc/dconf/profile
 cat >/etc/dconf/profile/gdm <<'EOF'
 user-db:user
@@ -60,21 +71,25 @@ EOF
 
 dconf update
 
-echo "[4/7] Block all system sleep targets at the systemd level…"
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+log "[4/8] Block suspend/hibernate at the systemd level"
+# Safe to repeat; masks just (re)point unit links to /dev/null
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target || true
 
-echo "[5/7] Tell logind to ignore lid/power sleep triggers…"
-# Edit (or append) logind.conf safely
-sed -i -e 's/^[#]*\s*HandleSuspendKey=.*/HandleSuspendKey=ignore/' \
-       -e 's/^[#]*\s*HandleHibernateKey=.*/HandleHibernateKey=ignore/' \
-       -e 's/^[#]*\s*HandleLidSwitch=.*/HandleLidSwitch=ignore/' \
-       -e 's/^[#]*\s*HandleLidSwitchExternalPower=.*/HandleLidSwitchExternalPower=ignore/' \
-       -e 's/^[#]*\s*HandleLidSwitchDocked=.*/HandleLidSwitchDocked=ignore/' \
-       /etc/systemd/logind.conf || true
-grep -q '^IdleAction=ignore' /etc/systemd/logind.conf || echo 'IdleAction=ignore' >> /etc/systemd/logind.conf
+log "[5/8] Make logind ignore lid/suspend actions"
+# Update or insert desired values; repeated runs are safe
+conf=/etc/systemd/logind.conf
+touch "$conf"
+sed -i \
+  -e 's/^[#[:space:]]*HandleSuspendKey=.*/HandleSuspendKey=ignore/' \
+  -e 's/^[#[:space:]]*HandleHibernateKey=.*/HandleHibernateKey=ignore/' \
+  -e 's/^[#[:space:]]*HandleLidSwitch=.*/HandleLidSwitch=ignore/' \
+  -e 's/^[#[:space:]]*HandleLidSwitchExternalPower=.*/HandleLidSwitchExternalPower=ignore/' \
+  -e 's/^[#[:space:]]*HandleLidSwitchDocked=.*/HandleLidSwitchDocked=ignore/' \
+  "$conf"
+grep -q '^IdleAction=ignore' "$conf" || echo 'IdleAction=ignore' >>"$conf"
 systemctl restart systemd-logind || true
 
-echo "[6/7] Disable console (tty) blanking on boot…"
+log "[6/8] Disable console (TTY) blanking on boot"
 cat >/etc/systemd/system/disable-console-blanking.service <<'EOF'
 [Unit]
 Description=Disable TTY console blanking
@@ -82,7 +97,8 @@ After=getty.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for t in /dev/tty[1-6]; do /usr/bin/setterm -term linux -blank 0 -powersave off -powerdown 0 >$t <$t; done'
+# Apply to the usual VTs; harmless if some don't exist
+ExecStart=/bin/sh -c 'for t in /dev/tty[1-12]; do /usr/bin/setterm -term linux -blank 0 -powersave off -powerdown 0 >"$t" <"$t" || true; done'
 
 [Install]
 WantedBy=multi-user.target
@@ -90,23 +106,40 @@ EOF
 systemctl daemon-reload
 systemctl enable --now disable-console-blanking.service
 
-echo "[7/7] Disable Wi-Fi power saving (NetworkManager)…"
+log "[7/8] Disable Wi-Fi powersave (NetworkManager)"
 install -d -m 0755 /etc/NetworkManager/conf.d
 cat >/etc/NetworkManager/conf.d/00-wifi-powersave-off.conf <<'EOF'
 [connection]
+# 2 = DISABLE Wi-Fi power saving
 wifi.powersave=2
 EOF
-systemctl restart NetworkManager || true
+# Restart NM only if present/active
+if systemctl is-enabled --quiet NetworkManager 2>/dev/null || systemctl is-active --quiet NetworkManager 2>/dev/null; then
+  systemctl restart NetworkManager || true
+fi
 
-# Optional: Key-only SSH hardening when SSH_KEY_PATH is provided
+log "[8/8] Optional: set up key-only SSH if SSH_KEY_PATH is provided"
 if [ "${SSH_KEY_PATH:-}" != "" ] && [ -f "$SSH_KEY_PATH" ]; then
   USERNAME="${SUDO_USER:-${LOGNAME:-$USER}}"
-  install -d -m 0700 -o "$USERNAME" -g "$USERNAME" "/home/$USERNAME/.ssh"
-  cat "$SSH_KEY_PATH" >>"/home/$USERNAME/.ssh/authorized_keys"
-  chown "$USERNAME":"$USERNAME" "/home/$USERNAME/.ssh/authorized_keys"
-  chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
+  HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
+  AUTH_DIR="$HOME_DIR/.ssh"
+  AUTH_FILE="$AUTH_DIR/authorized_keys"
 
+  install -d -m 0700 -o "$USERNAME" -g "$USERNAME" "$AUTH_DIR"
+  touch "$AUTH_FILE"
+  chown "$USERNAME":"$USERNAME" "$AUTH_FILE"
+  chmod 600 "$AUTH_FILE"
+
+  KEY_CONTENT="$(cat "$SSH_KEY_PATH")"
+  # Append only if the exact key line is not present
+  if ! grep -qxF "$KEY_CONTENT" "$AUTH_FILE"; then
+    echo "$KEY_CONTENT" >>"$AUTH_FILE"
+  fi
+
+  # Configure sshd to refuse passwords (safe to overwrite each run)
+  install -d /etc/ssh/sshd_config.d
   cat >/etc/ssh/sshd_config.d/90-key-only.conf <<'EOF'
+# Enforce public-key auth only
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -114,7 +147,8 @@ UsePAM yes
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 EOF
-  systemctl reload ssh
+  systemctl reload ssh || true
 fi
 
-echo "All set. Log out/in (or reboot) for GNOME dconf defaults to fully apply."
+echo
+echo "Done. If you had a desktop session running, log out/in (or reboot) once for GNOME/GDM dconf defaults to fully apply."
