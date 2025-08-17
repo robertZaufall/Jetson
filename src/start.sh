@@ -274,7 +274,7 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
+      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --headless vnc set-password || true
       printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
@@ -312,6 +312,7 @@ Wants=gnome-keyring-daemon.service
 [Service]
 Type=oneshot
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=XDG_RUNTIME_DIR=%t
 ExecStart=/bin/sh -lc '
   PASS_FILE="$HOME/.config/gnome-remote-desktop.vncpass";
   [ -f "$PASS_FILE" ] || exit 0;
@@ -321,7 +322,7 @@ ExecStart=/bin/sh -lc '
   grdctl vnc set-auth-method password || true;
   grdctl vnc disable-view-only || true;
   grdctl vnc enable || true;
-  grdctl vnc set-password "$PASS" || true;
+  printf "%s" "$PASS" | grdctl --headless vnc set-password || true;
   systemctl --user restart gnome-remote-desktop.service || true;
 '
 EOUNIT
