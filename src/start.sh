@@ -276,6 +276,8 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
     # VNC implementations commonly use the first 8 chars; keep it consistent across grdctl and keyring
     VNC_PASS8="${VNC_PASSWORD:0:8}"
 
+    DEFER_GRD=0
+
     # If there is no user D-Bus session yet (common when running over SSH before GUI login),
     # defer VNC setup to next GUI login via an autostart helper to avoid blocking here.
     if [ ! -S "$USER_BUS" ]; then
@@ -283,6 +285,8 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
       # Persist the password for the helper
       sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
       sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" '""$VNC_PASS8""' > "$HOME/.config/gnome-remote-desktop.vncpass"'
+
+      DEFER_GRD=1
 
       # Create an autostart helper that seeds the password and restarts g-r-d on login
       sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.local/bin" "$HOME_DIR/.config/autostart"
@@ -315,6 +319,7 @@ EODSK
       # Also drop through to create the systemd user override and helper service below; they will activate on login
     fi
 
+    if [ "$DEFER_GRD" -eq 0 ]; then
     if command -v grdctl >/dev/null 2>&1; then
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
@@ -327,11 +332,11 @@ EODSK
         # Jammy GNOME 42 path: pass the password as an argument
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
       fi
-      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
     else
       # Fallback to gsettings + secret-tool
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
@@ -339,8 +344,10 @@ EODSK
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
-      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+    fi
+
     fi
 
     # Ensure gnome-remote-desktop starts after the keyring is available (prevents password reset on boot)
@@ -350,8 +357,8 @@ EODSK
 After=gnome-keyring-daemon.service graphical-session.target
 Wants=gnome-keyring-daemon.service
 EOC
-    sudo -u "$USERNAME" systemctl --user daemon-reload || true
-    sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service || true
+    $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload || true
+    $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service || true
 
     # Create a user service to (re)seed the VNC password after session & keyring are up
     sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user"
@@ -378,14 +385,14 @@ ExecStart=/bin/sh -lc '
   systemctl --user restart gnome-remote-desktop.service || true;
 '
 EOUNIT
-    sudo -u "$USERNAME" systemctl --user daemon-reload || true
+    $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload || true
 
     # Persist the chosen password to the user's config for the ensure service (permissions 600)
     sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config"
     sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" "'"$VNC_PASS8"'" > "$HOME/.config/gnome-remote-desktop.vncpass"'
 
     # Enable the ensure service to run at each login
-    sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service || true
+    $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service || true
 
     # If linger was enabled earlier, it can start the service too early (before keyring). Disable it to avoid random password regeneration.
     if loginctl show-user "$USERNAME" -p Linger 2>/dev/null | grep -q '=yes'; then
