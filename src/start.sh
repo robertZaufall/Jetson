@@ -653,9 +653,42 @@ if command -v apt-get >/dev/null 2>&1; then
     else
       log " - snapd deb already $TARGET_DEB_VER; leaving as-is"
     fi
+    # Pin snapd to the target version so it remains the candidate even on dist-upgrade
+    cat >/etc/apt/preferences.d/99-snapd-pin <<EOF
+Package: snapd
+Pin: version $TARGET_DEB_VER
+Pin-Priority: 1001
+EOF
     # Hold deb so it won't jump to 2.70.x automatically
     apt-mark hold snapd >/dev/null 2>&1 || true
     systemctl restart snapd || true
+    if command -v snap >/dev/null 2>&1; then
+      if snap list snapd >/dev/null 2>&1; then
+        snap refresh --hold=forever snapd || true
+      else
+        log " - snapd snap not installed; nothing to hold at snap level (APT deb is pinned & held)"
+      fi
+    fi
+
+    # Proactively ensure the 'snapd' **snap** is at 2.68.5 too, so future snap operations don't pull a newer snapd snap
+    if command -v snap >/dev/null 2>&1; then
+      SD_SNAP_PRESENT=0
+      if snap list snapd >/dev/null 2>&1; then SD_SNAP_PRESENT=1; fi
+      if [ "$SD_SNAP_PRESENT" -eq 0 ] || [ "$(snap list snapd 2>/dev/null | awk 'NR==2{print $2}')" != "2.68.5" ]; then
+        TMPDIR=$(mktemp -d)
+        (cd "$TMPDIR" && snap download snapd --revision=24724) || true
+        if [ -f "$TMPDIR/snapd_24724.assert" ] && [ -f "$TMPDIR/snapd_24724.snap" ]; then
+          snap ack "$TMPDIR/snapd_24724.assert" || true
+          # If the snap exists but at a different version, this will refresh it to 2.68.5; otherwise installs it
+          snap install "$TMPDIR/snapd_24724.snap" || snap install --dangerous "$TMPDIR/snapd_24724.snap" || true
+          snap refresh --hold=forever snapd || true
+          log " - snapd snap set to 2.68.5 (rev 24724) and held"
+        else
+          log " - WARNING: Could not fetch snapd revision 24724; will rely on APT-held deb"
+        fi
+        rm -rf "$TMPDIR" || true
+      fi
+    fi
   else
     log " - Desired deb $TARGET_DEB_VER not available in APT; attempting snap-based fallback"
     if command -v snap >/dev/null 2>&1; then
@@ -663,14 +696,22 @@ if command -v apt-get >/dev/null 2>&1; then
       CUR_REV=$(snap list snapd 2>/dev/null | awk 'NR==2{print $3}')
       if [ "$CUR_VER" = "2.68.5" ]; then
         log " - snapd snap already at 2.68.5 (rev $CUR_REV); holding"
-        snap refresh --hold snapd || true
+        if snap list snapd >/dev/null 2>&1; then
+          snap refresh --hold=forever snapd || true
+        else
+          log " - snapd snap not installed; nothing to hold at snap level"
+        fi
       else
         TMPDIR=$(mktemp -d)
         (cd "$TMPDIR" && snap download snapd --revision=24724) || true
         if [ -f "$TMPDIR/snapd_24724.assert" ] && [ -f "$TMPDIR/snapd_24724.snap" ]; then
           snap ack "$TMPDIR/snapd_24724.assert" || true
           snap install "$TMPDIR/snapd_24724.snap" || true
-          snap refresh --hold snapd || true
+          if snap list snapd >/dev/null 2>&1; then
+            snap refresh --hold=forever snapd || true
+          else
+            log " - snapd snap not installed; nothing to hold at snap level"
+          fi
         else
           log " - ERROR: Failed to fetch snapd revision 24724 artifacts" >&2
         fi
