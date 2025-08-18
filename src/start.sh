@@ -13,7 +13,8 @@ for arg in "$@"; do
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
     --mks) MICROK8S=1 ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    --k3s) K3S=1 ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
@@ -22,6 +23,7 @@ VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 SWAP_SIZE=${SWAP_SIZE:-8G}
 MICROK8S=${MICROK8S:-0}
+K3S=${K3S:-0}
 
 resolve_user() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
@@ -708,6 +710,7 @@ else
   log " - snap not installed; skipping snap game removal"
 fi
 
+
 log "25) Install MicroK8s (snap) [optional]"
 if [ "${MICROK8S}" -eq 1 ]; then
   if command -v snap >/dev/null 2>&1; then
@@ -749,6 +752,109 @@ if [ "${MICROK8S}" -eq 1 ]; then
   fi
 else
   log " - Skipping MicroK8s install (use --mks to enable)"
+fi
+
+# --- Step 26: Clone jetson-containers and run install.sh (only if missing) ---
+log "26) Clone jetson-containers and run install.sh (only if missing)"
+# Ensure git is available
+if ! command -v git >/dev/null 2>&1; then
+  apt-get install -y git
+fi
+
+TARGET_DIR="$HOME_DIR/git/jetson-containers"
+install -d -m 0755 "$HOME_DIR/git"
+if [ -d "$TARGET_DIR" ]; then
+  log " - $TARGET_DIR already exists; skipping clone and install.sh"
+else
+  log " - Cloning https://github.com/dusty-nv/jetson-containers"
+  sudo -u "$USERNAME" git clone https://github.com/dusty-nv/jetson-containers "$TARGET_DIR" || true
+  # Run install.sh if present after clone
+  if [ -x "$TARGET_DIR/install.sh" ]; then
+    sudo -u "$USERNAME" bash -lc "cd '$TARGET_DIR' && ./install.sh" || true
+  else
+    log " - WARNING: install.sh not found or not executable at $TARGET_DIR after clone"
+  fi
+fi
+
+# --- Step 27: Install K3s [optional] ---
+log "27) Install K3s [optional]"
+if [ "${K3S}" -eq 1 ]; then
+  # Disable IPv6 at runtime (as requested)
+  sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+  sysctl -w net.ipv6.conf.default.disable_ipv6=1 || true
+  sysctl -w net.ipv6.conf.lo.disable_ipv6=1 || true
+
+  # --- K3s host prerequisites: kernel modules & sysctls ---
+  # Load required modules and persist at boot
+  cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+  modprobe overlay || true
+  modprobe br_netfilter || true
+
+  # Ensure Kubernetes networking sysctls (iptables must see bridged traffic; ip_forward required)
+  cat >/etc/sysctl.d/99-kubernetes.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+  sysctl --system || true
+
+  # Switch iptables to legacy if the system is using nft and k3s/docker have trouble (recommended by k3s docs)
+  if command -v update-alternatives >/dev/null 2>&1; then
+    if update-alternatives --query iptables 2>/dev/null | grep -q 'Value: /usr/sbin/iptables-nft'; then
+      update-alternatives --set iptables /usr/sbin/iptables-legacy || true
+    fi
+    if update-alternatives --query ip6tables 2>/dev/null | grep -q 'Value: /usr/sbin/ip6tables-nft'; then
+      update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy || true
+    fi
+  fi
+
+  # Ensure Docker is up before starting k3s --docker
+  systemctl enable --now docker || true
+  timeout 60s bash -lc 'until docker info >/dev/null 2>&1; do sleep 2; done' || log " - WARNING: Docker not responding at /var/run/docker.sock"
+
+  # Wait for IPv4 default route; k3s fails with "no default routes found" if none
+  if ! ip route show default | grep -q '^default'; then
+    log " - Waiting up to 90s for default IPv4 route..."
+    timeout 90s bash -lc 'until ip route show default | grep -q "^default"; do sleep 2; done' || log " - WARNING: no default route after waiting; consider static gateway or --node-ip/--advertise-address"
+  fi
+
+  # Derive NODE_IP from the primary route if available
+  NODE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src"){print $(i+1); exit}}}')
+
+  # Ensure kube config directory for the resolved user
+  sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.kube" || true
+  chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.kube" || true
+
+  # Install K3s using Docker and write kubeconfig to user's home, passing --node-ip/--advertise-address if available
+  K3S_INSTALL_ARGS="server --docker --write-kubeconfig-mode 644 --write-kubeconfig '$HOME_DIR/.kube/config'"
+  if [ -n "$NODE_IP" ]; then
+    K3S_INSTALL_ARGS="$K3S_INSTALL_ARGS --node-ip $NODE_IP --advertise-address $NODE_IP"
+  fi
+  sh -c "curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"$K3S_INSTALL_ARGS\" sh -s -" || true
+
+  # Ensure k3s waits for network-online and Docker at boot
+  install -d -m 0755 /etc/systemd/system/k3s.service.d
+  cat >/etc/systemd/system/k3s.service.d/override.conf <<'EOF'
+[Unit]
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+EOF
+  systemctl daemon-reload
+  systemctl restart k3s || true
+
+  # Give k3s a brief moment to start and collect diagnostics if it fails
+  sleep 3
+  systemctl is-active --quiet k3s || journalctl -u k3s -n 100 --no-pager || true
+
+  # Post-install checks (non-blocking with timeouts)
+  systemctl status k3s --no-pager || true
+  timeout 120s kubectl cluster-info || true
+  kubectl get nodes || true
+else
+  log " - Skipping K3s install (use --k3s to enable)"
 fi
 
 if [ "$REBOOT" -eq 1 ]; then
