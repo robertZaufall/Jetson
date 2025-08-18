@@ -8,7 +8,7 @@ for arg in "$@"; do
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
     --vnc-backend=*) VNC_BACKEND="${arg#*=}" ;;
-    --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ;;
+    --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ; VNC_ENCRYPTION_EXPLICIT=1 ;;
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
@@ -24,6 +24,14 @@ VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 SWAP_SIZE=${SWAP_SIZE:-8G}
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
+
+VNC_ENCRYPTION_EXPLICIT=${VNC_ENCRYPTION_EXPLICIT:-0}
+# Default to no VNC encryption for GNOME Remote Desktop when a password is supplied,
+# unless the user explicitly set an encryption preference. This improves compatibility
+# with clients like RealVNC Viewer which commonly fail to negotiate GNOME's TLS.
+if [ -n "${VNC_PASSWORD:-}" ] && [ "${VNC_BACKEND}" = "grd" ] && [ "${VNC_ENCRYPTION_EXPLICIT}" -eq 0 ]; then
+  VNC_NO_ENCRYPTION=1
+fi
 
 resolve_user() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
@@ -273,8 +281,12 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
   if [ "${VNC_BACKEND}" = "grd" ]; then
     # --- GNOME Remote Desktop (VNC) ---
     apt-get install -y gnome-remote-desktop libsecret-tools || true
-    # VNC implementations commonly use the first 8 chars; keep it consistent across grdctl and keyring
-    VNC_PASS8="${VNC_PASSWORD:0:8}"
+    # VNC protocol uses only the first 8 **bytes** (DES). Force ASCII and 8 bytes for broad client compatibility (e.g., RealVNC).
+    VNC_PASS8="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)"
+    if [ -z "$VNC_PASS8" ]; then
+      log " - WARNING: Provided VNC password had no ASCII bytes; falling back to first 8 characters."
+      VNC_PASS8="${VNC_PASSWORD:0:8}"
+    fi
 
     DEFER_GRD=0
 
@@ -381,9 +393,14 @@ ExecStart=/bin/sh -lc '
   grdctl vnc set-auth-method password || true;
   grdctl vnc disable-view-only || true;
   grdctl vnc enable || true;
+  # Disable VNC encryption for broad client compatibility (e.g., RealVNC)
+  gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true;
   if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi;
   systemctl --user restart gnome-remote-desktop.service || true;
 '
+
+[Install]
+WantedBy=default.target
 EOUNIT
     $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload || true
 
@@ -775,8 +792,8 @@ install -d -m 0755 "$HOME_DIR/git"
 if [ -d "$TARGET_DIR" ]; then
   log " - $TARGET_DIR already exists; skipping clone and install.sh"
 else
-  log " - Cloning https://github.com/dusty-nv/jetson-containers"
-  sudo -u "$USERNAME" git clone https://github.com/dusty-nv/jetson-containers "$TARGET_DIR" || true
+  log " - Cloning jetson-containers"
+  sudo -u "$USERNAME" git clone https://github.com/robertZaufall/jetson-containers "$TARGET_DIR" || true
   # Run install.sh if present after clone
   if [ -x "$TARGET_DIR/install.sh" ]; then
     sudo -u "$USERNAME" bash -lc "cd '$TARGET_DIR' && ./install.sh" || true
@@ -865,6 +882,20 @@ EOF
 else
   log " - Skipping K3s install (use --k3s to enable)"
 fi
+
+ # --- Step 28: Install Helm (Kubernetes package manager) ---
+ log "28) Install Helm (Kubernetes package manager)"
+ if command -v helm >/dev/null 2>&1; then
+   log " - Helm already installed; skipping."
+ else
+   # Add official Helm apt repository and key (per helm.sh docs)
+   apt-get install -y apt-transport-https gnupg curl || true
+   curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor | tee /usr/share/keyrings/helm.gpg >/dev/null
+   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" \
+     > /etc/apt/sources.list.d/helm-stable-debian.list
+   apt-get update -y
+   apt-get install -y helm
+ fi
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
