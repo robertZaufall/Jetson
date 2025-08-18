@@ -26,9 +26,8 @@ MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
 
 VNC_ENCRYPTION_EXPLICIT=${VNC_ENCRYPTION_EXPLICIT:-0}
-# Default to no VNC encryption for GNOME Remote Desktop when a password is supplied,
-# unless the user explicitly set an encryption preference. This improves compatibility
-# with clients like RealVNC Viewer which commonly fail to negotiate GNOME's TLS.
+# Only adjust VNC encryption defaults when a password is supplied on this run.
+# When the script runs without --vnc-password, leave all existing VNC settings untouched.
 if [ -n "${VNC_PASSWORD:-}" ] && [ "${VNC_BACKEND}" = "grd" ] && [ "${VNC_ENCRYPTION_EXPLICIT}" -eq 0 ]; then
   VNC_NO_ENCRYPTION=1
 fi
@@ -213,41 +212,47 @@ install -d -m 0755 /etc/gdm3
 touch "$GDM_CONF"
 grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
 awk -v user="$USERNAME" '
-BEGIN{in_d=0; se=0; su=0; sw=0}
+BEGIN{in_d=0; se=0; su=0}
 {
   if ($0 ~ /^\[daemon\]/){in_d=1; print; next}
-  if (in_d && $0 ~ /^\[/){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; if(!sw) print "WaylandEnable=false"; in_d=0 }
+  if (in_d && $0 ~ /^\[/){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; in_d=0 }
   if (in_d){
     if ($0 ~ /^[#[:space:]]*AutomaticLoginEnable[[:space:]]*=/){print "AutomaticLoginEnable=true"; se=1; next}
     if ($0 ~ /^[#[:space:]]*AutomaticLogin[[:space:]]*=/){print "AutomaticLogin=" user; su=1; next}
-    if ($0 ~ /^[#[:space:]]*WaylandEnable[[:space:]]*=/){print "WaylandEnable=false"; sw=1; next}
+    # Intentionally leave any existing WaylandEnable= line unchanged to avoid breaking GNOME Remote Desktop VNC
   }
   print
 }
-END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user; if(!sw) print "WaylandEnable=false" } }
+END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user } }
 ' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
 
 log "12) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
 mkdir -p "$KEYRINGS_DIR"
 
-# Backup any existing keyrings once (timestamped)
-if ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
-  TS=$(date +%Y%m%d-%H%M%S)
-  BACKUP_DIR="$HOME_DIR/.local/share/keyrings-backup-$TS"
-  cp -a "$KEYRINGS_DIR" "$BACKUP_DIR" || true
-  chown -R "$USERNAME":"$USERNAME" "$BACKUP_DIR" || true
-fi
-
-# Define an unencrypted default keyring named "Default_keyring"
 DEFAULT_POINTER_FILE="$KEYRINGS_DIR/default"
 DEFAULT_RING_FILE="$KEYRINGS_DIR/Default_keyring.keyring"
 
-# Point the default file to our unencrypted keyring
-echo -n "Default_keyring" > "$DEFAULT_POINTER_FILE"
+if [ -f "$DEFAULT_POINTER_FILE" ] && [ -f "$DEFAULT_RING_FILE" ]; then
+  log " - Existing default keyring detected; leaving keyring unchanged."
+  # Still ensure ownership/permissions are sane
+  chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
+  chmod 700 "$KEYRINGS_DIR" 2>/dev/null || true
+  chmod 600 "$DEFAULT_RING_FILE" 2>/dev/null || true
+else
+  # Backup any existing keyrings once (timestamped)
+  if ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
+    TS=$(date +%Y%m%d-%H%M%S)
+    BACKUP_DIR="$HOME_DIR/.local/share/keyrings-backup-$TS"
+    cp -a "$KEYRINGS_DIR" "$BACKUP_DIR" || true
+    chown -R "$USERNAME":"$USERNAME" "$BACKUP_DIR" || true
+  fi
 
-# Create a minimal unencrypted keyring file (plaintext format)
-cat >"$DEFAULT_RING_FILE" <<'EOF'
+  # Point the default file to our unencrypted keyring
+  echo -n "Default_keyring" > "$DEFAULT_POINTER_FILE"
+
+  # Create a minimal unencrypted keyring file (plaintext format)
+  cat >"$DEFAULT_RING_FILE" <<'EOF'
 [keyring]
 display-name=Default keyring
 ctime=0
@@ -256,13 +261,14 @@ lock-on-idle=false
 lock-after=false
 EOF
 
-# Tighten permissions and ownership
-chmod 700 "$KEYRINGS_DIR" || true
-chmod 600 "$DEFAULT_RING_FILE" || true
-chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
+  # Tighten permissions and ownership
+  chmod 700 "$KEYRINGS_DIR" || true
+  chmod 600 "$DEFAULT_RING_FILE" || true
+  chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
 
-# Remove any leftover encrypted login keyring files that could trigger prompts
-rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" 2>/dev/null || true
+  # Remove any leftover encrypted login keyring files that could trigger prompts
+  rm -f "$KEYRINGS_DIR/login.keyring" "$KEYRINGS_DIR/user.keystore" 2>/dev/null || true
+fi
 
 cat >/etc/issue.keyring-note <<'EOF'
 NOTE: Keyring configured for **unsafe storage**. A plaintext keyring was created and set as default,
@@ -281,6 +287,18 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
   if [ "${VNC_BACKEND}" = "grd" ]; then
     # --- GNOME Remote Desktop (VNC) ---
     apt-get install -y gnome-remote-desktop libsecret-tools || true
+    # Ensure Wayland is enabled in GDM for GNOME Remote Desktop (VNC) to function correctly
+    GDM_CONF="/etc/gdm3/custom.conf"
+    if [ -f "$GDM_CONF" ]; then
+      if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
+        sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=true/' "$GDM_CONF" || true
+      else
+        # Make sure the [daemon] section exists and append the setting
+        grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
+        printf 'WaylandEnable=true\n' >> "$GDM_CONF"
+      fi
+      log " - Enabled Wayland in GDM (WaylandEnable=true) for GNOME Remote Desktop VNC. Log out/in (or reboot) to apply."
+    fi
     # VNC protocol uses only the first 8 **bytes** (DES). Force ASCII and 8 bytes for broad client compatibility (e.g., RealVNC).
     VNC_PASS8="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)"
     if [ -z "$VNC_PASS8" ]; then
@@ -316,8 +334,10 @@ printf "%s" "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC passwo
 grdctl vnc set-auth-method password || true
 grdctl vnc disable-view-only || true
 grdctl vnc enable || true
+gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
 if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi
-systemctl --user restart gnome-remote-desktop.service || true
+systemctl --user enable --now gnome-remote-desktop.service || true
+systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
 EOSH
       sudo -u "$USERNAME" chmod 700 "$HOME_DIR/.local/bin/grd-ensure-vnc-pass.sh"
 
@@ -349,6 +369,8 @@ EODSK
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl status || true
     else
       # Fallback to gsettings + secret-tool
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
@@ -358,6 +380,7 @@ EODSK
       fi
       printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
     fi
 
     fi
@@ -389,14 +412,17 @@ ExecStart=/bin/sh -lc '
   [ -f "$PASS_FILE" ] || exit 0;
   PASS=$(head -n1 "$PASS_FILE");
   [ -n "$PASS" ] || exit 0;
-  echo -n "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword;
+
   grdctl vnc set-auth-method password || true;
   grdctl vnc disable-view-only || true;
   grdctl vnc enable || true;
   # Disable VNC encryption for broad client compatibility (e.g., RealVNC)
   gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true;
-  if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi;
-  systemctl --user restart gnome-remote-desktop.service || true;
+
+  if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || grdctl --headless vnc set-password "$PASS" || true; else grdctl vnc set-password "$PASS" || true; fi;
+
+  systemctl --user enable --now gnome-remote-desktop.service || true;
+  systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true;
 '
 
 [Install]
@@ -457,7 +483,7 @@ EOF
     ufw allow 5900/tcp || true
   fi
 else
-  log "13) VNC setup skipped (no --vnc-password provided)"
+  log "13) VNC: no changes (run with --vnc-password=... to modify VNC settings)"
 fi
 
 log "14) Rename device (hostname) if requested"
