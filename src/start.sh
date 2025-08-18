@@ -615,28 +615,30 @@ else
   apt-get install -y docker-buildx-plugin docker-compose-plugin || true
 fi
 
-log "21) Configure Docker default runtime to NVIDIA (if available)"
+log "21) Configure Docker default runtime to NVIDIA (forced)"
 mkdir -p /etc/docker
 DAEMON_JSON=/etc/docker/daemon.json
-if command -v nvidia-ctk >/dev/null 2>&1; then
-  nvidia-ctk runtime configure --runtime=docker --config=$DAEMON_JSON || true
-  if ! grep -q '"default-runtime"[[:space:]]*:[[:space:]]*"nvidia"' "$DAEMON_JSON" 2>/dev/null; then
-    tmp=$(mktemp)
-    if grep -q '"runtimes"' "$DAEMON_JSON" 2>/dev/null; then
-      # Insert default-runtime near the beginning if not present
-      sed -E 's/\{[[:space:]]*/{\n  "default-runtime": "nvidia",\n/' "$DAEMON_JSON" > "$tmp" || cp "$DAEMON_JSON" "$tmp"
-    else
-      printf '{\n  "runtimes": { "nvidia": { "path": "nvidia-container-runtime", "runtimeArgs": [] } },\n  "default-runtime": "nvidia"\n}\n' > "$tmp"
-    fi
-    cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" 2>/dev/null || true
-    mv "$tmp" "$DAEMON_JSON"
-  fi
-else
-  if ! grep -q '"default-runtime"[[:space:]]*:[[:space:]]*"nvidia"' "$DAEMON_JSON" 2>/dev/null; then
-    cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" 2>/dev/null || true
-    printf '{\n  "runtimes": { "nvidia": { "path": "nvidia-container-runtime", "runtimeArgs": [] } },\n  "default-runtime": "nvidia"\n}\n' > "$DAEMON_JSON"
-  fi
+
+# Backup existing config if present
+if [ -f "$DAEMON_JSON" ]; then
+  cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" || true
 fi
+
+# Write the requested configuration verbatim
+cat >"$DAEMON_JSON" <<'EOF'
+{
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    },
+    "default-runtime": "nvidia"
+}
+EOF
+
+# Reload and restart Docker to apply
+systemctl daemon-reload || true
 systemctl restart docker || true
 
 log "22) Ensure $USERNAME is in 'docker' group"
