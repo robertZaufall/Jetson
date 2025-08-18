@@ -12,7 +12,8 @@ for arg in "$@"; do
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    --mks) MICROK8S=1 ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
   esac
 done
 
@@ -20,6 +21,7 @@ log(){ printf '\n=== %s ===\n' "$*"; }
 VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 SWAP_SIZE=${SWAP_SIZE:-8G}
+MICROK8S=${MICROK8S:-0}
 
 resolve_user() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
@@ -639,91 +641,13 @@ else
   log " - Added $USERNAME to docker group. You may need to log out/in for group changes to take effect."
 fi
 
-log "23) Ensure snapd is 2.68.5 on Ubuntu 22.04 (hold to avoid 2.70.x)"
-TARGET_DEB_VER="2.68.5+ubuntu22.04.1"
 
-if command -v apt-get >/dev/null 2>&1; then
-  INSTALLED_DEB_VER=$(dpkg-query -W -f='${Version}' snapd 2>/dev/null || echo "")
-  # Check if the desired deb version is available from configured repos
-  if apt-cache madison snapd 2>/dev/null | awk '{print $3}' | grep -Fxq "$TARGET_DEB_VER"; then
-    if [ "$INSTALLED_DEB_VER" != "$TARGET_DEB_VER" ]; then
-      log " - Installing snapd=$TARGET_DEB_VER from APT"
-      apt-get update -y
-      apt-get install -y "snapd=$TARGET_DEB_VER" || true
-    else
-      log " - snapd deb already $TARGET_DEB_VER; leaving as-is"
-    fi
-    # Pin snapd to the target version so it remains the candidate even on dist-upgrade
-    cat >/etc/apt/preferences.d/99-snapd-pin <<EOF
-Package: snapd
-Pin: version $TARGET_DEB_VER
-Pin-Priority: 1001
-EOF
-    # Hold deb so it won't jump to 2.70.x automatically
-    apt-mark hold snapd >/dev/null 2>&1 || true
-    systemctl restart snapd || true
-    if command -v snap >/dev/null 2>&1; then
-      if snap list snapd >/dev/null 2>&1; then
-        snap refresh --hold=forever snapd || true
-      else
-        log " - snapd snap not installed; nothing to hold at snap level (APT deb is pinned & held)"
-      fi
-    fi
-
-    # Proactively ensure the 'snapd' **snap** is at 2.68.5 too, so future snap operations don't pull a newer snapd snap
-    if command -v snap >/dev/null 2>&1; then
-      SD_SNAP_PRESENT=0
-      if snap list snapd >/dev/null 2>&1; then SD_SNAP_PRESENT=1; fi
-      if [ "$SD_SNAP_PRESENT" -eq 0 ] || [ "$(snap list snapd 2>/dev/null | awk 'NR==2{print $2}')" != "2.68.5" ]; then
-        TMPDIR=$(mktemp -d)
-        (cd "$TMPDIR" && snap download snapd --revision=24724) || true
-        if [ -f "$TMPDIR/snapd_24724.assert" ] && [ -f "$TMPDIR/snapd_24724.snap" ]; then
-          snap ack "$TMPDIR/snapd_24724.assert" || true
-          # If the snap exists but at a different version, this will refresh it to 2.68.5; otherwise installs it
-          snap install "$TMPDIR/snapd_24724.snap" || snap install --dangerous "$TMPDIR/snapd_24724.snap" || true
-          snap refresh --hold=forever snapd || true
-          log " - snapd snap set to 2.68.5 (rev 24724) and held"
-        else
-          log " - WARNING: Could not fetch snapd revision 24724; will rely on APT-held deb"
-        fi
-        rm -rf "$TMPDIR" || true
-      fi
-    fi
-  else
-    log " - Desired deb $TARGET_DEB_VER not available in APT; attempting snap-based fallback"
-    if command -v snap >/dev/null 2>&1; then
-      CUR_VER=$(snap list snapd 2>/dev/null | awk 'NR==2{print $2}')
-      CUR_REV=$(snap list snapd 2>/dev/null | awk 'NR==2{print $3}')
-      if [ "$CUR_VER" = "2.68.5" ]; then
-        log " - snapd snap already at 2.68.5 (rev $CUR_REV); holding"
-        if snap list snapd >/dev/null 2>&1; then
-          snap refresh --hold=forever snapd || true
-        else
-          log " - snapd snap not installed; nothing to hold at snap level"
-        fi
-      else
-        TMPDIR=$(mktemp -d)
-        (cd "$TMPDIR" && snap download snapd --revision=24724) || true
-        if [ -f "$TMPDIR/snapd_24724.assert" ] && [ -f "$TMPDIR/snapd_24724.snap" ]; then
-          snap ack "$TMPDIR/snapd_24724.assert" || true
-          snap install "$TMPDIR/snapd_24724.snap" || true
-          if snap list snapd >/dev/null 2>&1; then
-            snap refresh --hold=forever snapd || true
-          else
-            log " - snapd snap not installed; nothing to hold at snap level"
-          fi
-        else
-          log " - ERROR: Failed to fetch snapd revision 24724 artifacts" >&2
-        fi
-        rm -rf "$TMPDIR" || true
-      fi
-    else
-      log " - 'snap' command not found; cannot use snap fallback"
-    fi
-  fi
-else
-  log " - APT not available; skipping deb path"
-fi
+log "23) Force snapd 2.68.5 (rev 24724) and hold (always)"
+snap download snapd --revision=24724
+snap ack snapd_24724.assert
+snap install snapd_24724.snap
+snap refresh --hold snapd
+rm -f snapd_24724.assert snapd_24724.snap || true
 
 log "24) Remove preinstalled games (apt & snap)"
 
@@ -782,6 +706,49 @@ if command -v snap >/dev/null 2>&1; then
   done
 else
   log " - snap not installed; skipping snap game removal"
+fi
+
+log "25) Install MicroK8s (snap) [optional]"
+if [ "${MICROK8S}" -eq 1 ]; then
+  if command -v snap >/dev/null 2>&1; then
+    if snap list microk8s >/dev/null 2>&1; then
+      log " - MicroK8s already installed; skipping."
+    else
+      log " - Installing MicroK8s (snap)"
+      snap install microk8s --classic || log " - ERROR: snap install microk8s failed"
+    fi
+    # Ensure the user can run microk8s without sudo
+    if ! getent group microk8s >/dev/null; then
+      groupadd microk8s || true
+    fi
+    if ! id -nG "$USERNAME" | tr ' ' '\n' | grep -qx microk8s; then
+      usermod -aG microk8s "$USERNAME" || true
+      log " - Added $USERNAME to 'microk8s' group (log out/in to take effect)."
+    fi
+    # Prepare kube config directory for the user (non-blocking convenience)
+    sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.kube" || true
+    chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.kube" || true
+
+    # Provide a kubectl alias for interactive shells
+    ALIAS_LINE="alias kubectl='microk8s kubectl'"
+    # System-wide profile script (affects interactive shells)
+    echo "$ALIAS_LINE" > /etc/profile.d/microk8s-kubectl.sh
+    chmod 644 /etc/profile.d/microk8s-kubectl.sh
+    # Ensure the resolved user's .bashrc also has the alias (idempotent)
+    if ! grep -qxF "$ALIAS_LINE" "$HOME_DIR/.bashrc" 2>/dev/null; then
+      echo "$ALIAS_LINE" >> "$HOME_DIR/.bashrc"
+    fi
+    chown "$USERNAME":"$USERNAME" "$HOME_DIR/.bashrc" || true
+
+    # Wait for MicroK8s to become ready (up to 5 minutes) to avoid blocking indefinitely
+    if command -v microk8s >/dev/null 2>&1; then
+      timeout 300s microk8s status --wait-ready || log " - WARNING: MicroK8s not ready within 5 minutes"
+    fi
+  else
+    log " - snap not available; skipping MicroK8s install"
+  fi
+else
+  log " - Skipping MicroK8s install (use --mks to enable)"
 fi
 
 if [ "$REBOOT" -eq 1 ]; then
