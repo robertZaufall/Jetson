@@ -263,6 +263,8 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
   log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
   USER_UID=$(id -u "$USERNAME")
   USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
+  USER_BUS="/run/user/${USER_UID}/bus"
+  TIMEOUT="timeout 10s"
 
   if [ "${VNC_BACKEND}" = "grd" ]; then
     # --- GNOME Remote Desktop (VNC) ---
@@ -270,22 +272,68 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
     # VNC implementations commonly use the first 8 chars; keep it consistent across grdctl and keyring
     VNC_PASS8="${VNC_PASSWORD:0:8}"
 
+    # If there is no user D-Bus session yet (common when running over SSH before GUI login),
+    # defer VNC setup to next GUI login via an autostart helper to avoid blocking here.
+    if [ ! -S "$USER_BUS" ]; then
+      log " - No user D-Bus session detected; deferring GNOME Remote Desktop setup to first GUI login."
+      # Persist the password for the helper
+      sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
+      sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" '""$VNC_PASS8""' > "$HOME/.config/gnome-remote-desktop.vncpass"'
+
+      # Create an autostart helper that seeds the password and restarts g-r-d on login
+      sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.local/bin" "$HOME_DIR/.config/autostart"
+      sudo -u "$USERNAME" tee "$HOME_DIR/.local/bin/grd-ensure-vnc-pass.sh" >/dev/null <<'EOSH'
+#!/bin/sh
+set -e
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+PASS_FILE="$HOME/.config/gnome-remote-desktop.vncpass"
+[ -s "$PASS_FILE" ] || exit 0
+PASS=$(head -n1 "$PASS_FILE")
+[ -n "$PASS" ] || exit 0
+# Store secret then configure
+printf "%s" "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+grdctl vnc set-auth-method password || true
+grdctl vnc disable-view-only || true
+grdctl vnc enable || true
+if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi
+systemctl --user restart gnome-remote-desktop.service || true
+EOSH
+      sudo -u "$USERNAME" chmod 700 "$HOME_DIR/.local/bin/grd-ensure-vnc-pass.sh"
+
+      sudo -u "$USERNAME" tee "$HOME_DIR/.config/autostart/grd-ensure-vnc-pass.desktop" >/dev/null <<'EODSK'
+[Desktop Entry]
+Type=Application
+Name=Ensure VNC password (GNOME Remote Desktop)
+Exec=/bin/sh -lc "$HOME/.local/bin/grd-ensure-vnc-pass.sh"
+X-GNOME-Autostart-enabled=true
+EODSK
+      # Also drop through to create the systemd user override and helper service below; they will activate on login
+    fi
+
     if command -v grdctl >/dev/null 2>&1; then
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
-      printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --headless vnc set-password || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
+      # Set VNC password: GNOME 42 (Jammy) expects an argument; newer versions accept stdin with --headless
+      if sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --help 2>&1 | grep -q -- '--headless'; then
+        # Newer grdctl
+        printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --headless vnc set-password || true
+      else
+        # Jammy GNOME 42 path: pass the password as an argument
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
+      fi
       printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
-        sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
     else
       # Fallback to gsettings + secret-tool
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
       if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
-        sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       printf '%s' "$VNC_PASS8" | sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
@@ -322,7 +370,7 @@ ExecStart=/bin/sh -lc '
   grdctl vnc set-auth-method password || true;
   grdctl vnc disable-view-only || true;
   grdctl vnc enable || true;
-  printf "%s" "$PASS" | grdctl --headless vnc set-password || true;
+  if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi;
   systemctl --user restart gnome-remote-desktop.service || true;
 '
 EOUNIT
