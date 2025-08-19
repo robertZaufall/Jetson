@@ -731,13 +731,13 @@ for p in "${APT_GAMES[@]}"; do
   dpkg -s "$p" >/dev/null 2>&1 && TO_PURGE+=("$p") || true
 done
 
-if [ ${#TO_PURGE[@]} -gt 0 ]; then
-  log " - Purging APT games: ${TO_PURGE[*]}"
-  apt-get purge -y "${TO_PURGE[@]}" || true
-  apt-get autoremove -y || true
-else
-  log " - No listed APT games installed; skipping purge"
-fi
+# if [ ${#TO_PURGE[@]} -gt 0 ]; then
+#   log " - Purging APT games: ${TO_PURGE[*]}"
+#   apt-get purge -y "${TO_PURGE[@]}" || true
+#   apt-get autoremove -y || true
+# else
+#   log " - No listed APT games installed; skipping purge"
+# fi
 
 # Remove snap-installed GNOME games if present
 if command -v snap >/dev/null 2>&1; then
@@ -755,7 +755,8 @@ if command -v snap >/dev/null 2>&1; then
   for s in "${SNAP_GAMES[@]}"; do
     if snap list "$s" >/dev/null 2>&1; then
       log " - Removing snap: $s"
-      snap remove --purge "$s" || true
+      snap remove "$s" || true
+      # snap remove --purge "$s" || true
     fi
   done
 else
