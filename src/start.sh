@@ -308,10 +308,14 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
 
     DEFER_GRD=0
 
-    # If there is no user D-Bus session yet (common when running over SSH before GUI login),
-    # defer VNC setup to next GUI login via an autostart helper to avoid blocking here.
-    if [ ! -S "$USER_BUS" ]; then
-      log " - No user D-Bus session detected; deferring GNOME Remote Desktop setup to first GUI login."
+    # If there is no user D-Bus session yet OR the user session bus is not responding OR
+    # gnome-remote-desktop is not active, defer setup to the next GUI login to avoid blocking here.
+    if [ ! -S "$USER_BUS" ] || \
+       ! sudo -u "$USERNAME" env "${USER_ENV[@]}" gdbus call --session \
+          --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+          --method org.freedesktop.DBus.ListNames >/dev/null 2>&1 || \
+       ! sudo -u "$USERNAME" systemctl --user is-active --quiet gnome-remote-desktop.service; then
+      log " - No ready user D-Bus/GRD session; deferring GNOME Remote Desktop setup to first GUI login."
       # Persist the password for the helper
       sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
       sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" '""$VNC_PASS8""' > "$HOME/.config/gnome-remote-desktop.vncpass"'
@@ -722,6 +726,7 @@ APT_GAMES=(
   four-in-a-row
   hitori
   gnome-nibbles
+  cheese
 )
 
 TO_PURGE=()
@@ -729,13 +734,13 @@ for p in "${APT_GAMES[@]}"; do
   dpkg -s "$p" >/dev/null 2>&1 && TO_PURGE+=("$p") || true
 done
 
-# if [ ${#TO_PURGE[@]} -gt 0 ]; then
-#   log " - Purging APT games: ${TO_PURGE[*]}"
-#   apt-get purge -y "${TO_PURGE[@]}" || true
-#   apt-get autoremove -y || true
-# else
-#   log " - No listed APT games installed; skipping purge"
-# fi
+if [ ${#TO_PURGE[@]} -gt 0 ]; then
+  log " - Purging APT games: ${TO_PURGE[*]}"
+  apt-get purge -y "${TO_PURGE[@]}" || true
+  apt-get autoremove -y || true
+else
+  log " - No listed APT games installed; skipping purge"
+fi
 
 # Remove snap-installed GNOME games if present
 if command -v snap >/dev/null 2>&1; then
@@ -753,8 +758,7 @@ if command -v snap >/dev/null 2>&1; then
   for s in "${SNAP_GAMES[@]}"; do
     if snap list "$s" >/dev/null 2>&1; then
       log " - Removing snap: $s"
-      snap remove "$s" || true
-      # snap remove --purge "$s" || true
+      snap remove --purge "$s" || true
     fi
   done
 else
@@ -923,6 +927,50 @@ if [ "${K3S}" -eq 1 ]; then
     apt-get install -y helm
   fi
 fi
+
+# --- Step 29: Install guvcview ---
+log "29) Install guvcview"
+apt-get install -y guvcview
+
+
+# --- Step 30: Clean some system components ---
+# log "30) Clean some system components"
+# APT_PURGE=(
+#   gnome-software
+#   packagekit
+#   packagekit-tools
+#   update-notifier
+#   tracker3
+#   tracker3-miners
+#   gnome-online-accounts
+#   fwupd
+# )
+# log "Stopping services (best effort)…"
+# systemctl stop packagekit 2>/dev/null || true
+# systemctl stop fwupd 2>/dev/null || true
+# TRACKER_CACHE="${HOME}/.cache/tracker3"
+# if [ -d "$TRACKER_CACHE" ]; then
+#   log "Removing user Tracker cache at $TRACKER_CACHE"
+#   rm -rf "$TRACKER_CACHE" || true
+# fi
+# log "Purging desktop background-updaters & indexers…"
+# TO_PURGE=()
+# for p in "${APT_PURGE[@]}"; do
+#   dpkg -s "$p" >/dev/null 2>&1 && TO_PURGE+=("$p")
+# done
+# if [ "${#TO_PURGE[@]}" -gt 0 ]; then
+#   apt-get update -y
+#   DEBIAN_FRONTEND=noninteractive apt-get purge -y "${TO_PURGE[@]}"
+# else
+#   log "Nothing from main list is installed; skipping."
+# fi
+# log "Autoremove any orphaned deps…"
+# DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+# apt-get clean
+# log "Masking leftover services if any…"
+# systemctl mask packagekit.service 2>/dev/null || true
+# systemctl mask fwupd.service 2>/dev/null || true
+
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
