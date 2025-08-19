@@ -524,10 +524,12 @@ fi
 
 
 log "16) Install jetson-stats (jtop) and patch version mapping"
-apt-get install -y python3-pip
-pip3 install -U jetson-stats
-systemctl daemon-reload || true
-systemctl restart jtop.service || true
+if ! python3 -c "import jtop" >/dev/null 2>&1; then
+  apt-get install -y python3-pip
+  pip3 install -U jetson-stats
+  systemctl daemon-reload || true
+  systemctl restart jtop.service || true
+fi
 
 # Patch jetson-stats to map L4T 36.4.4 -> JetPack 6.2.1
 JTOP_VARS_FILE=$(python3 - <<'PY'
@@ -658,31 +660,27 @@ else
   apt-get install -y docker-buildx-plugin docker-compose-plugin || true
 fi
 
-log "21) Configure Docker default runtime to NVIDIA (forced)"
-mkdir -p /etc/docker
+log "21) Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
-
-# Backup existing config if present
+DOCKER_NVIDIA_JSON='{
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "nvidia"
+}'
 if [ -f "$DAEMON_JSON" ]; then
+  if ! cmp -s <(echo "$DOCKER_NVIDIA_JSON") "$DAEMON_JSON"; then
   cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" || true
+  echo "$DOCKER_NVIDIA_JSON" > "$DAEMON_JSON"
+  systemctl daemon-reload || true
+  systemctl restart docker || true
+  else
+  log " - Docker daemon.json already matches NVIDIA runtime config; skipping replace."
+  fi
 fi
-
-# Write the requested configuration verbatim
-cat >"$DAEMON_JSON" <<'EOF'
-{
-    "runtimes": {
-        "nvidia": {
-            "path": "nvidia-container-runtime",
-            "runtimeArgs": []
-        }
-    },
-    "default-runtime": "nvidia"
-}
-EOF
-
-# Reload and restart Docker to apply
-systemctl daemon-reload || true
-systemctl restart docker || true
 
 log "22) Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
