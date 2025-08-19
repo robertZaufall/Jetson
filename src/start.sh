@@ -909,19 +909,21 @@ else
   log " - Skipping K3s install (use --k3s to enable)"
 fi
 
- # --- Step 28: Install Helm (Kubernetes package manager) ---
- log "28) Install Helm (Kubernetes package manager)"
- if command -v helm >/dev/null 2>&1; then
-   log " - Helm already installed; skipping."
- else
-   # Add official Helm apt repository and key (per helm.sh docs)
-   apt-get install -y apt-transport-https gnupg curl || true
-   curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor | tee /usr/share/keyrings/helm.gpg >/dev/null
-   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" \
-     > /etc/apt/sources.list.d/helm-stable-debian.list
-   apt-get update -y
-   apt-get install -y helm
- fi
+# --- Step 28: Install Helm (Kubernetes package manager) [optional, only if K3s is installed] ---
+if [ "${K3S}" -eq 1 ]; then
+  log "28) Install Helm (Kubernetes package manager)"
+  if command -v helm >/dev/null 2>&1; then
+    log " - Helm already installed; skipping."
+  else
+    # Add official Helm apt repository and key (per helm.sh docs)
+    apt-get install -y apt-transport-https gnupg curl || true
+    curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor | tee /usr/share/keyrings/helm.gpg >/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" \
+      > /etc/apt/sources.list.d/helm-stable-debian.list
+    apt-get update -y
+    apt-get install -y helm
+  fi
+fi
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
