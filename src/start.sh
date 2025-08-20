@@ -42,6 +42,41 @@ USERNAME="$(resolve_user)"
 HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
 log "Target user: $USERNAME ($HOME_DIR)"
 
+# 0) Configure German keyboard layout (system-wide + GNOME + GDM)
+log "0) Set German keyboard layout (system + GNOME + GDM)"
+# Console + X11 defaults
+localectl set-keymap de 2>/dev/null || true
+localectl set-x11-keymap de 2>/dev/null || true
+# Ensure /etc/default/keyboard reflects 'de' (helps TTYs and early boot)
+if [ -f /etc/default/keyboard ]; then
+  sed -i -E 's/^XKBLAYOUT=.*/XKBLAYOUT="de"/' /etc/default/keyboard || true
+else
+  cat >/etc/default/keyboard <<'EOF'
+XKBMODEL="pc105"
+XKBLAYOUT="de"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+fi
+# Apply to current console if possible (best-effort)
+udevadm trigger --subsystem-match=input --action=change 2>/dev/null || true
+command -v setupcon >/dev/null 2>&1 && setupcon -k 2>/dev/null || true
+# Set GNOME defaults for user sessions (system dconf) and GDM greeter
+install -d -m 0755 /etc/dconf/db/local.d
+cat >/etc/dconf/db/local.d/00-keyboard-de <<'EOF'
+[org/gnome/desktop/input-sources]
+sources=[('xkb','de')]
+xkb-options=['terminate:ctrl_alt_bksp']
+EOF
+install -d -m 0755 /etc/dconf/db/gdm.d
+cat >/etc/dconf/db/gdm.d/00-keyboard-de <<'EOF'
+[org/gnome/desktop/input-sources]
+sources=[('xkb','de')]
+xkb-options=['terminate:ctrl_alt_bksp']
+EOF
+dconf update 2>/dev/null || true
+
 log "1) Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -49,6 +84,11 @@ apt-get install -y openssh-server dconf-cli nano btop curl git-lfs
 git lfs install --system || true
 systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
+
+# 1.1) Install NVIDIA JetPack SDK meta-package
+log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-jetpack
 
 log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
 # Ensure the dconf user profile reads system 'local' DB (required for defaults to apply)
