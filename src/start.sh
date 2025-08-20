@@ -625,21 +625,21 @@ fi
 
 log "19) Set Jetson power mode to MAXN (nvpmodel)"
 if command -v nvpmodel >/dev/null 2>&1; then
-  if nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+  if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
     log " - Power mode already MAXN; skipping."
   else
     for id in 0 1 2 3 4 5 6 7 8 9; do
-      if nvpmodel -m "$id" >/dev/null 2>&1; then
+      if timeout 5s nvpmodel -m "$id" >/dev/null 2>&1; then
         sleep 1
-        if nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+        if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
           log " - Set power mode to MAXN via nvpmodel -m $id"
           break
         fi
       fi
     done
-    if ! nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+    if ! timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
       log " - WARNING: Could not set MAXN automatically. Available modes:"
-      nvpmodel -q 2>/dev/null || true
+      timeout 5s nvpmodel -q 2>/dev/null || true
       log "   You may need to check /etc/nvpmodel.conf for mode numbers."
     fi
   fi
