@@ -699,6 +699,7 @@ $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
 tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt-get update -y
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker || true
 else
   log " - Docker already installed; ensuring plugins present"
   apt-get install -y docker-buildx-plugin docker-compose-plugin || true
@@ -715,15 +716,27 @@ DOCKER_NVIDIA_JSON='{
   },
   "default-runtime": "nvidia"
 }'
+
+# Ensure the config directory exists
+install -d -m 0755 /etc/docker || true
+
 if [ -f "$DAEMON_JSON" ]; then
+  # Replace the file only if it differs from our desired config
   if ! cmp -s <(echo "$DOCKER_NVIDIA_JSON") "$DAEMON_JSON"; then
-  cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" || true
+    cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" || true
+    echo "$DOCKER_NVIDIA_JSON" > "$DAEMON_JSON"
+    systemctl daemon-reload || true
+    systemctl restart docker || true
+  else
+    log " - Docker daemon.json already matches NVIDIA runtime config; skipping replace."
+  fi
+else
+  # Create daemon.json when missing
+  log " - Creating $DAEMON_JSON with NVIDIA default runtime"
   echo "$DOCKER_NVIDIA_JSON" > "$DAEMON_JSON"
   systemctl daemon-reload || true
-  systemctl restart docker || true
-  else
-  log " - Docker daemon.json already matches NVIDIA runtime config; skipping replace."
-  fi
+  # Ensure the Docker service is up (starts if installed but not running yet)
+  systemctl enable --now docker || systemctl restart docker || true
 fi
 
 log "22) Ensure $USERNAME is in 'docker' group"
