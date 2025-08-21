@@ -21,7 +21,15 @@ done
 log(){ printf '\n=== %s ===\n' "$*"; }
 VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
-SWAP_SIZE=${SWAP_SIZE:-8G}
+# Auto-default swap size to 8G (8GB RAM) or 16G (16GB RAM) when not set
+if [ -z "${SWAP_SIZE:-}" ]; then
+  mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "$mem_kb" -ge $((12*1024*1024)) ]; then
+    SWAP_SIZE=16G
+  else
+    SWAP_SIZE=8G
+  fi
+fi
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
 
@@ -85,7 +93,7 @@ git lfs install --system || true
 systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
-# 1.1) Install NVIDIA JetPack SDK meta-package
+# 1) Install NVIDIA JetPack SDK meta-package
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-jetpack
@@ -595,7 +603,7 @@ if [ -f "$JTOP_VARS_FILE" ]; then
 fi
 systemctl restart jtop.service || true
 
-log "17) Ensure swapfile size is $SWAP_SIZE (default 8G)"
+log "17) Ensure swapfile size is $SWAP_SIZE (auto-default 8G/16G)"
 to_bytes() {
   local s="$1"
   if command -v numfmt >/dev/null 2>&1; then
@@ -1023,6 +1031,27 @@ apt-get install -y guvcview
 # log "Masking leftover services if any…"
 # systemctl mask packagekit.service 2>/dev/null || true
 # systemctl mask fwupd.service 2>/dev/null || true
+
+
+log "31) Install NVM + Node LTS + OpenAI Codex CLI"
+sudo -u "$USERNAME" bash -lc '
+set -e
+export NVM_DIR="$HOME/.nvm"
+if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+  echo " - Installing nvm to $NVM_DIR"
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+fi
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# Ensure LTS Node is present and default
+nvm install --lts
+nvm alias default "lts/*" || true
+nvm use --lts
+# Install/refresh Codex CLI
+npm i -g @openai/codex
+# Show versions for verification
+node -v || true
+npm -v || true
+'
 
 
 if [ "$REBOOT" -eq 1 ]; then
