@@ -179,6 +179,17 @@ pip install jetson-stats
 jtop
 ```
 
+## Headless mode
+Just now:  
+```
+sudo init 3 # headless
+sudo init 5 # ui active
+```
+Permanent:  
+```
+sudo systemctl set-default multi-user.target # headless mode permanent
+sudo systemctl set-default graphical.target  # deactivate permanent headless mode
+```
 ## Exfat
 ```
 sudo add-apt-repository universe
