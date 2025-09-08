@@ -17,9 +17,7 @@ export JETPACK=$HOME/nvidia/nvidia_sdk/JetPack_6.2_Linux_.../Linux_for_Tegra
 cd $JETPACK
 sudo ./apply_binaries.sh
 sudo ./tools/l4t_flash_prerequisites.sh
-
-cd $JETPACK/tools
- sudo ./l4t_create_default_user.sh -u <user_name> -p <password>
+sudo ./tools/l4t_create_default_user.sh -u <user_name> -p <password>
 
 sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
   -c tools/kernel_flash/flash_l4t_t234_nvme.xml -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
@@ -28,7 +26,7 @@ sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
 On the Jetson:  
 ```
 sudo apt update && sudo apt upgrade
-sudo apt-get install nvidia-jetpack
+sudo apt install nvidia-jetpack -y
 ```
 https://docs.nvidia.com/jetson/archives/jetpack-archived/jetpack-62/install-setup/index.html#upgrade-jetpack  
 
@@ -43,8 +41,8 @@ sudo sed -i "s/^\(127\.0\.1\.1\s*\).*/\1NEWNAME/" /etc/hosts
 
 ## Fix wifi (Yahboom carrier board)  
 ```
-sudo apt update && sudo apt upgrade
-sudo apt install iwlwifi-modules
+sudo apt update
+sudo apt install iwlwifi-modules -y
 ```
 
 ## Install tools  
@@ -117,8 +115,8 @@ docker run hello-world
 Install docker if necessary:  
 ```
 # Add Docker's official GPG key:
-sudo apt-get update
-sudo apt-get install ca-certificates curl gnupg
+sudo apt update
+sudo apt install ca-certificates curl gnupg -y
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
@@ -128,10 +126,10 @@ echo \
 "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
 "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
 sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
+sudo apt update
 
-sudo apt install docker-buildx-plugin
-sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt install docker-buildx-plugin -y
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 ```
 
 ### Move Docker to nova_ssd:
@@ -176,15 +174,26 @@ sudo docker run --runtime nvidia -it --rm -v /run/jtop.sock:/run/jtop.sock --net
 
 Inside container:  
 ```
-apt install python3-pip
+apt install python3-pip -y
 pip install jetson-stats
 jtop
 ```
 
+## Headless mode
+Just now:  
+```
+sudo init 3 # headless
+sudo init 5 # ui active
+```
+Permanent:  
+```
+sudo systemctl set-default multi-user.target # headless mode permanent
+sudo systemctl set-default graphical.target  # deactivate permanent headless mode
+```
 ## Exfat
 ```
 sudo add-apt-repository universe
 sudo apt update
-sudo apt install exfatprogs
-# sudo apt install exfat-fuse
+sudo apt install exfatprogs -y
+# sudo apt install exfat-fuse -y
 ```
