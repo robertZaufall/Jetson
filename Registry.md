@@ -244,41 +244,54 @@ Docker tree:
 
 ## Tag, push, copy images  
 Tagging, pushing and copying to another registry (here: Azure CR) using `skopeo`.  
-Install `skopeo`:
+
+Install `skopeo` on Linux:
 ```
 sudo apt install skopeo -y
+```
+
+Install `skopeo` on macOS:
+```
+brew install skopeo
 ```
 
 Create and start the script:  
 ```
 #!/usr/bin/env bash
 
-# Array of image names
-IMAGES=(
-  "image1"
-  "image2"
-  "image3"
+IMAGES_REGISTRY=(
+    "image1"
+    "image2"
+)
+IMAGES_REGISTRY_SKOPEO=(
+    "image1"
+    "image2"
 )
 
-# Azure Container Registry name
-ACR_NAME="<acr_name>.azurecr.io"
-skopeo login "$ACR_NAME" --username "MY_USERNAME" --password "MY_PASSWORD"
+ACR_NAME="<acr-name>.azurecr.io"
+ACR_USER="<username>"
+ACR_PASS="<password>"
+skopeo login "$ACR_NAME" --username "$ACR_USER" --password "$ACR_PASS"
 
-# Loop through each image
-for IMAGE in "${IMAGES[@]}"; do
+for IMAGE in "${IMAGES_REGISTRY[@]}"; do
+    docker tag "$IMAGE" registry.local:5555/"$IMAGE"
+    docker push registry.local:5555/"$IMAGE"
+done
 
-   # tag
-   docker tag "$IMAGE" registry.local:5555/"$IMAGE"
-
-   # push
-   docker push registry.local:5555/"$IMAGE"
-
-   # copy
-   skopeo copy \
-     docker://registry.local:5555/"$IMAGE":latest \
-     docker://"$ACR_NAME"/"$IMAGE":latest
-  
+for IMAGE in "${IMAGES_REGISTRY_SKOPEO[@]}"; do
+    skopeo copy docker://registry.local:5555/"$IMAGE":latest docker://"$ACR_NAME"/"$IMAGE":latest
 done
 
 echo "Done."
 ```
+
+On macOS:
+```
+docker login <acr-name>.azurecr.io --username <acr-username> --password <acr-password>
+```
+
+```
+skopeo login <acr-name>.azurecr.io --username <acr-username> --password <acr-password>
+skopeo copy docker://registry.local:5555/<image>:latest docker://<acr-name>.azurecr.io/<image>:latest
+```
+
