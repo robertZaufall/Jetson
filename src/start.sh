@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REBOOT=${REBOOT:-0}
+REG_IP=${REG_IP:-${REG:-}}
 for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
@@ -14,14 +15,24 @@ for arg in "$@"; do
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
     --mks) MICROK8S=1 ;;
     --k3s) K3S=1 ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...]" ; exit 0 ;;
+    REG=*) REG_IP="${arg#*=}" ;;
+    --reg=*) REG_IP="${arg#*=}" ;;
+    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...] [REG=REGISTRY_IP|--reg=REGISTRY_IP]" ; exit 0 ;;
   esac
 done
 
 log(){ printf '\n=== %s ===\n' "$*"; }
 VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
-SWAP_SIZE=${SWAP_SIZE:-8G}
+# Auto-default swap size to 8G (8GB RAM) or 16G (16GB RAM) when not set
+if [ -z "${SWAP_SIZE:-}" ]; then
+  mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "$mem_kb" -ge $((12*1024*1024)) ]; then
+    SWAP_SIZE=16G
+  else
+    SWAP_SIZE=8G
+  fi
+fi
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
 
@@ -85,7 +96,7 @@ git lfs install --system || true
 systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
-# 1.1) Install NVIDIA JetPack SDK meta-package
+# 1) Install NVIDIA JetPack SDK meta-package
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-jetpack
@@ -595,7 +606,7 @@ if [ -f "$JTOP_VARS_FILE" ]; then
 fi
 systemctl restart jtop.service || true
 
-log "17) Ensure swapfile size is $SWAP_SIZE (default 8G)"
+log "17) Ensure swapfile size is $SWAP_SIZE (auto-default 8G/16G)"
 to_bytes() {
   local s="$1"
   if command -v numfmt >/dev/null 2>&1; then
@@ -699,6 +710,7 @@ $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
 tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt-get update -y
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker || true
 else
   log " - Docker already installed; ensuring plugins present"
   apt-get install -y docker-buildx-plugin docker-compose-plugin || true
@@ -706,25 +718,39 @@ fi
 
 log "21) Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
-DOCKER_NVIDIA_JSON='{
-  "runtimes": {
-    "nvidia": {
-      "path": "nvidia-container-runtime",
-      "runtimeArgs": []
-    }
-  },
-  "default-runtime": "nvidia"
-}'
-if [ -f "$DAEMON_JSON" ]; then
-  if ! cmp -s <(echo "$DOCKER_NVIDIA_JSON") "$DAEMON_JSON"; then
-  cp "$DAEMON_JSON" "$DAEMON_JSON.bak.$(date +%s)" || true
-  echo "$DOCKER_NVIDIA_JSON" > "$DAEMON_JSON"
-  systemctl daemon-reload || true
-  systemctl restart docker || true
-  else
-  log " - Docker daemon.json already matches NVIDIA runtime config; skipping replace."
-  fi
+if ! command -v python3 >/dev/null 2>&1; then
+  apt-get update -y && apt-get install -y python3 || true
 fi
+python3 - "$DAEMON_JSON" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+data = {}
+try:
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            data = json.load(f)
+except Exception:
+    data = {}
+
+# Ensure NVIDIA runtime is configured
+runtimes = data.get('runtimes', {})
+nvidia = runtimes.get('nvidia', {})
+nvidia['path'] = 'nvidia-container-runtime'
+nvidia['runtimeArgs'] = nvidia.get('runtimeArgs', [])
+runtimes['nvidia'] = nvidia
+data['runtimes'] = runtimes
+data['default-runtime'] = 'nvidia'
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(data, f, indent=2, sort_keys=False)
+os.replace(tmp, path)
+PY
+systemctl daemon-reload || true
+systemctl restart docker || true
+log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
 
 log "22) Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
@@ -1010,6 +1036,109 @@ apt-get install -y guvcview
 # log "Masking leftover services if any…"
 # systemctl mask packagekit.service 2>/dev/null || true
 # systemctl mask fwupd.service 2>/dev/null || true
+
+
+# --- Step 31: Configure local registry (optional via REG IP) ---
+log "31) Configure local registry (optional)"
+if [ -n "${REG_IP:-}" ]; then
+  # Basic IPv4 sanity check (do not hard fail if mismatched)
+  if echo "$REG_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+    log " - Using registry IP: $REG_IP"
+
+    # 31.1) Add/replace registry.local in /etc/hosts
+    if [ -f /etc/hosts ]; then
+      cp /etc/hosts "/etc/hosts.bak.$(date +%s)" || true
+      awk 'index($0,"registry.local")==0' /etc/hosts > /etc/hosts.tmp && \
+        printf "%s registry.local\n" "$REG_IP" >> /etc/hosts.tmp && \
+        mv /etc/hosts.tmp /etc/hosts
+    else
+      printf "%s registry.local\n" "$REG_IP" > /etc/hosts
+    fi
+    log " - Mapped registry.local to $REG_IP in /etc/hosts"
+
+    # 31.2) Install domain.crt for Docker registry.local on ports 5001/5002/5555
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    CERT_SRC="$SCRIPT_DIR/domain.crt"
+    if [ -f "$CERT_SRC" ]; then
+      for d in \
+        /etc/docker/certs.d/registry.local:5001 \
+        /etc/docker/certs.d/registry.local:5002 \
+        /etc/docker/certs.d/registry.local:5555; do
+        install -d -m 0755 "$d" || true
+      done
+      cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5001/ca.crt
+      cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5002/ca.crt
+      cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5555/ca.crt
+      chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt || true
+      chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt || true
+      chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt || true
+      log " - Installed domain.crt to Docker certs.d for registry.local"
+    else
+      log " - WARNING: domain.crt not found at $CERT_SRC; skipping cert installation"
+    fi
+
+    # 31.3) Ensure Docker daemon.json has registry mirrors
+    DAEMON_JSON=/etc/docker/daemon.json
+    if ! command -v python3 >/dev/null 2>&1; then
+      apt-get update -y && apt-get install -y python3 || true
+    fi
+    python3 - "$DAEMON_JSON" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+data = {}
+try:
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            data = json.load(f)
+except Exception:
+    data = {}
+
+mirrors = data.get('registry-mirrors', [])
+required = [
+    'https://registry.local:5001',
+    'https://registry.local:5002',
+]
+for m in required:
+    if m not in mirrors:
+        mirrors.append(m)
+data['registry-mirrors'] = mirrors
+
+tmp = path + '.tmp'
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(tmp, 'w') as f:
+    json.dump(data, f, indent=2, sort_keys=False)
+os.replace(tmp, path)
+PY
+    systemctl daemon-reload || true
+    systemctl restart docker || true
+    log " - Ensured registry mirrors in $DAEMON_JSON and restarted Docker"
+  else
+    log " - WARNING: REG provided but not an IPv4 address: $REG_IP"
+  fi
+else
+  log " - Skipping registry setup (provide REG=IP or --reg=IP)"
+fi
+
+log "32) Install NVM + Node LTS + OpenAI Codex CLI"
+sudo -u "$USERNAME" bash -lc '
+set -e
+export NVM_DIR="$HOME/.nvm"
+if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+  echo " - Installing nvm to $NVM_DIR"
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+fi
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# Ensure LTS Node is present and default
+nvm install --lts
+nvm alias default "lts/*" || true
+nvm use --lts
+# Install/refresh Codex CLI
+npm i -g @openai/codex
+# Show versions for verification
+node -v || true
+npm -v || true
+'
 
 
 if [ "$REBOOT" -eq 1 ]; then

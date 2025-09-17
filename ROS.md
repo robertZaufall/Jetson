@@ -15,13 +15,13 @@ sudo rm -rf ~/opencv_contrib
 
 ## Nvidia Isaac
 ```
-sudo apt-get install git-lfs
+sudo apt install git-lfs -y
 git lfs install --skip-repo
 ```
 
 ```
-sudo apt-get update
-sudo apt-get install ca-certificates curl gnupg
+sudo apt update
+sudo apt install ca-certificates curl gnupg -y
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
@@ -30,10 +30,10 @@ echo \
 "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
 "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
 sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
+sudo apt update
 
-sudo apt install docker-buildx-plugin
-sudo apt install libgtk-3-dev
+sudo apt install docker-buildx-plugin -y
+sudo apt install libgtk-3-dev -y
 ```
 
 Create ROS Workspace on nova_ssd
@@ -67,7 +67,7 @@ cat << EOF > Dockerfile
 FROM nvcr.io/nvidia/isaac/ros:aarch64-ros2_humble_5d698e0d23e98e2567b1c9b70abd0c1f
 
 # Install additional dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt update && apt install -y \
     ros-humble-cv-bridge \
     ros-humble-image-transport \
     ros-humble-image-pipeline \
