@@ -14,6 +14,7 @@ ROOTFS="$JETPACK/rootfs"
 cd "$JETPACK"
 sudo ./apply_binaries.sh --openrm
 sudo ./tools/l4t_flash_prerequisites.sh
+#LC_ALL=C.UTF-8 LANG=C.UTF-8 sudo ./tools/l4t_create_default_user.sh -u "$1" -p "$2" -a -n "$3" --accept-license
 sudo ./tools/l4t_create_default_user.sh -u "$1" -p "$2" -a -n "$3" --accept-license
 
 # --- set German keyboard system-wide in the target rootfs ---
@@ -63,6 +64,24 @@ maybe_chroot_config() {
 }
 maybe_chroot_config
 # --- end keyboard preset ---
+
+ensure_locales_in_rootfs() {
+  if [[ -x /usr/bin/qemu-aarch64-static ]]; then
+    for m in proc sys dev dev/pts; do sudo mount --bind "/$m" "$ROOTFS/$m"; done
+    sudo chroot "$ROOTFS" bash -c '
+      set -e
+      apt-get update
+      # Ensure locale tooling and (optional) translations are present
+      DEBIAN_FRONTEND=noninteractive apt-get install -y locales language-pack-de language-pack-en || true
+      sed -i "s/^# *de_DE.UTF-8 UTF-8/de_DE.UTF-8 UTF-8/" /etc/locale.gen
+      sed -i "s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" /etc/locale.gen
+      locale-gen de_DE.UTF-8 en_US.UTF-8
+      update-locale LANG=de_DE.UTF-8 LANGUAGE=de_DE:de
+    ' || true
+    for m in dev/pts dev sys proc; do sudo umount -lf "$ROOTFS/$m" || true; done
+  fi
+}
+ensure_locales_in_rootfs
 
 
 # ---------- Home script on target (NOT Desktop) ----------
