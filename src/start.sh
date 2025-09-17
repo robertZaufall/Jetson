@@ -22,6 +22,30 @@ for arg in "$@"; do
 done
 
 log(){ printf '\n=== %s ===\n' "$*"; }
+
+# Small helpers
+apt_install_retry() {
+  # Usage: apt_install_retry pkg1 [pkg2 ...]
+  # Be resilient to transient DNS/network hiccups
+  DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "$@" || return 1
+}
+
+have_user_bus() {
+  # Args: uid
+  local uid="$1"; local bus="/run/user/${uid}/bus"
+  [ -S "$bus" ] || return 1
+  XDG_RUNTIME_DIR="/run/user/${uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.ListNames >/dev/null 2>&1
+}
+
+gsettings_has_key() {
+  # Args: schema key
+  local schema="$1" key="$2"
+  gsettings list-keys "$schema" 2>/dev/null | grep -qx "$key"
+}
 VNC_BACKEND=${VNC_BACKEND:-grd}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 # Auto-default swap size to 8G (8GB RAM) or 16G (16GB RAM) when not set
@@ -52,6 +76,23 @@ USERNAME="$(resolve_user)"
 [ -n "$USERNAME" ] || { echo "ERROR: could not resolve a non-root user." >&2; exit 1; }
 HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
 log "Target user: $USERNAME ($HOME_DIR)"
+
+# Detect platform (L4T and device) for cross-version behavior (Orin NX/Nano 36.4.4, Thor 38.2)
+detect_l4t() {
+  local ver pkgver
+  if pkgver=$(dpkg-query -W -f='${Version}' nvidia-l4t-core 2>/dev/null); then
+    # Extract X.Y.Z
+    ver=$(printf '%s\n' "$pkgver" | sed -n 's/\b\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)
+  elif [ -r /etc/nv_tegra_release ]; then
+    # Fallback parse from nv_tegra_release
+    ver=$(sed -n "s/.*R\([0-9][0-9]*\) *\.* *REVISION *\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2.\3/p" /etc/nv_tegra_release | head -n1)
+  fi
+  printf '%s' "${ver:-unknown}"
+}
+L4T_VERSION=$(detect_l4t)
+. /etc/os-release 2>/dev/null || true
+UBUNTU_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-unknown}}
+log "Platform: L4T ${L4T_VERSION:-unknown} on Ubuntu ${UBUNTU_CODENAME}"
 
 # 0) Configure German keyboard layout (system-wide + GNOME + GDM)
 log "0) Set German keyboard layout (system + GNOME + GDM)"
@@ -90,16 +131,21 @@ dconf update 2>/dev/null || true
 
 log "1) Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y openssh-server dconf-cli nano btop curl git-lfs
+# Use resilient installer to tolerate transient DNS/network issues across L4T 36.4.4/38.2
+if ! apt_install_retry openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs; then
+  log " - WARNING: base tools not fully installed (offline?). Will continue."
+  # Best-effort fallback without failing the whole script
+  apt-get install -y openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs || true
+fi
 git lfs install --system || true
 systemctl enable --now ssh || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
 
 # 1) Install NVIDIA JetPack SDK meta-package
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-jetpack
+if ! apt_install_retry nvidia-jetpack; then
+  log " - WARNING: could not install nvidia-jetpack now (repo/DNS?). Skipping."
+fi
 
 log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
 # Ensure the dconf user profile reads system 'local' DB (required for defaults to apply)
@@ -337,7 +383,11 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
 
   if [ "${VNC_BACKEND}" = "grd" ]; then
     # --- GNOME Remote Desktop (VNC) ---
-    apt-get install -y gnome-remote-desktop libsecret-tools || true
+    # Install required tools with retries; tolerate offline installs gracefully
+    if ! apt_install_retry gnome-remote-desktop libsecret-tools; then
+      log " - WARNING: could not install libsecret-tools/gnome-remote-desktop (temporary network/DNS issue?)."
+      log "           Continuing without them; will finalize on next online GUI login."
+    fi
     # Ensure Wayland is enabled in GDM for GNOME Remote Desktop (VNC) to function correctly
     GDM_CONF="/etc/gdm3/custom.conf"
     if [ -f "$GDM_CONF" ]; then
@@ -361,11 +411,8 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
 
     # If there is no user D-Bus session yet OR the user session bus is not responding OR
     # gnome-remote-desktop is not active, defer setup to the next GUI login to avoid blocking here.
-    if [ ! -S "$USER_BUS" ] || \
-       ! sudo -u "$USERNAME" env "${USER_ENV[@]}" gdbus call --session \
-          --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
-          --method org.freedesktop.DBus.ListNames >/dev/null 2>&1 || \
-       ! sudo -u "$USERNAME" systemctl --user is-active --quiet gnome-remote-desktop.service; then
+    if ! have_user_bus "$USER_UID" || \
+       ! sudo -u "$USERNAME" systemctl --user is-active --quiet gnome-remote-desktop.service 2>/dev/null; then
       log " - No ready user D-Bus/GRD session; deferring GNOME Remote Desktop setup to first GUI login."
       # Persist the password for the helper
       sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
@@ -389,7 +436,9 @@ printf "%s" "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC passwo
 grdctl vnc set-auth-method password || true
 grdctl vnc disable-view-only || true
 grdctl vnc enable || true
-gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+if gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption; then
+  gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+fi
 if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi
 systemctl --user enable --now gnome-remote-desktop.service || true
 systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
@@ -420,7 +469,7 @@ EODSK
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
       fi
       printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc | grep -qx encryption'; then
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
@@ -430,7 +479,7 @@ EODSK
       # Fallback to gsettings + secret-tool
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ]; then
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc | grep -qx encryption'; then
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
@@ -447,8 +496,10 @@ EODSK
 After=gnome-keyring-daemon.service graphical-session.target
 Wants=gnome-keyring-daemon.service
 EOC
-    $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload || true
-    $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service || true
+    if [ "$DEFER_GRD" -eq 0 ]; then
+      $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload 2>/dev/null || true
+      $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service 2>/dev/null || true
+    fi
 
     # Create a user service to (re)seed the VNC password after session & keyring are up
     sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user"
@@ -472,7 +523,9 @@ ExecStart=/bin/sh -lc '
   grdctl vnc disable-view-only || true;
   grdctl vnc enable || true;
   # Disable VNC encryption for broad client compatibility (e.g., RealVNC)
-  gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true;
+  if gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption; then
+    gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true;
+  fi
 
   if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || grdctl --headless vnc set-password "$PASS" || true; else grdctl vnc set-password "$PASS" || true; fi;
 
@@ -483,14 +536,23 @@ ExecStart=/bin/sh -lc '
 [Install]
 WantedBy=default.target
 EOUNIT
-    $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload || true
+    if [ "$DEFER_GRD" -eq 0 ]; then
+      $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload 2>/dev/null || true
+    fi
 
     # Persist the chosen password to the user's config for the ensure service (permissions 600)
     sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config"
     sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" "'"$VNC_PASS8"'" > "$HOME/.config/gnome-remote-desktop.vncpass"'
 
-    # Enable the ensure service to run at each login
-    $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service || true
+    # Enable the ensure service to run at each login (defer if no user bus)
+    if [ "$DEFER_GRD" -eq 0 ]; then
+      $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service 2>/dev/null || true
+    else
+      # Offline-enable by creating the wants symlink so it's active on next login
+      sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user/default.target.wants" || true
+      sudo -u "$USERNAME" ln -sf "$HOME_DIR/.config/systemd/user/grd-ensure-vnc-pass.service" \
+        "$HOME_DIR/.config/systemd/user/default.target.wants/grd-ensure-vnc-pass.service" || true
+    fi
 
     # If linger was enabled earlier, it can start the service too early (before keyring). Disable it to avoid random password regeneration.
     if loginctl show-user "$USERNAME" -p Linger 2>/dev/null | grep -q '=yes'; then
@@ -581,7 +643,8 @@ fi
 log "16) Install jetson-stats (jtop) and patch version mapping"
 if ! python3 -c "import jtop" >/dev/null 2>&1; then
   apt-get install -y python3-pip
-  pip3 install -U jetson-stats
+  # On Ubuntu 24.04+ with PEP 668, pip requires --break-system-packages for system installs
+  pip3 install -U jetson-stats --break-system-packages
   systemctl daemon-reload || true
   systemctl restart jtop.service || true
 fi
@@ -602,6 +665,9 @@ fi
 if [ -f "$JTOP_VARS_FILE" ]; then
   if ! grep -q '"36.4.4": "6.2.1",' "$JTOP_VARS_FILE"; then
     sed -i -E '0,/"36\.4\.3": "6\.2",/s//"36.4.4": "6.2.1",\n    "36.4.3": "6.2",/' "$JTOP_VARS_FILE" || true
+  fi
+  if ! grep -q '"38.2.0": "7.0",' "$JTOP_VARS_FILE"; then
+    sed -i -E '0,/"36\.4\.4": "6\.2\.1",/s//"38.2.0": "7.0",\n    "36.4.4": "6.2.1",/' "$JTOP_VARS_FILE" || true
   fi
 fi
 systemctl restart jtop.service || true
@@ -676,22 +742,43 @@ fi
 
 log "19) Set Jetson power mode to MAXN (nvpmodel)"
 if command -v nvpmodel >/dev/null 2>&1; then
+  MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+  IS_ORIN_NX_OR_NANO=0
+  echo "$MODEL" | grep -Eiq 'Orin[[:space:]-]*(NX|Nano)' && IS_ORIN_NX_OR_NANO=1
+  IS_THOR=0
+  echo "$MODEL" | grep -Eiq 'Thor' && IS_THOR=1
+
+  # Default desired mode is 0; for Thor (not Orin NX/Nano) use 1 per platform mapping
+  DESIRED_MODE=0
+  if [ "$IS_THOR" -eq 1 ] && [ "$IS_ORIN_NX_OR_NANO" -eq 0 ]; then
+    DESIRED_MODE=1
+  fi
+
   if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
     log " - Power mode already MAXN; skipping."
   else
-    for id in 0 1 2 3 4 5 6 7 8 9; do
-      if timeout 5s nvpmodel -m "$id" >/dev/null 2>&1; then
-        sleep 1
-        if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-          log " - Set power mode to MAXN via nvpmodel -m $id"
-          break
+    # Try desired mode first
+    if timeout 5s nvpmodel -m "$DESIRED_MODE" >/dev/null 2>&1; then
+      sleep 1
+    fi
+    if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+      log " - Set power mode to MAXN via nvpmodel -m $DESIRED_MODE (model: ${MODEL:-unknown})"
+    else
+      # Fallback: brute-force through modes 0-9 until MAXN is found
+      for id in 0 1 2 3 4 5 6 7 8 9; do
+        if timeout 5s nvpmodel -m "$id" >/dev/null 2>&1; then
+          sleep 1
+          if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+            log " - Set power mode to MAXN via nvpmodel -m $id (fallback)"
+            break
+          fi
         fi
+      done
+      if ! timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+        log " - WARNING: Could not set MAXN automatically. Available modes:"
+        timeout 5s nvpmodel -q 2>/dev/null || true
+        log "   You may need to check /etc/nvpmodel.conf for mode numbers."
       fi
-    done
-    if ! timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-      log " - WARNING: Could not set MAXN automatically. Available modes:"
-      timeout 5s nvpmodel -q 2>/dev/null || true
-      log "   You may need to check /etc/nvpmodel.conf for mode numbers."
     fi
   fi
 else
@@ -764,12 +851,21 @@ else
 fi
 
 
-log "23) Force snapd 2.68.5 (rev 24724) and hold (always)"
-snap download snapd --revision=24724
-snap ack snapd_24724.assert
-snap install snapd_24724.snap
-snap refresh --hold snapd
-rm -f snapd_24724.assert snapd_24724.snap || true
+log "23) Force snapd 2.68.5 (rev 24724) and hold (conditional)"
+# Parse L4T version from /etc/nv_tegra_release as MAJOR.MINOR.PATCH (e.g., 36.4.4 or 38.2.0)
+L4T_VER="$(awk 'BEGIN{maj="";rev=""} /^# R[0-9]/{maj=$2;gsub(/[^0-9]/,"",maj); if(match($0,/REVISION:[[:space:]]*([0-9]+(\.[0-9]+)*)/,m)){rev=m[1]} print maj"."rev; exit }' /etc/nv_tegra_release 2>/dev/null || true)"
+if printf '%s' "$L4T_VER" | grep -qE '^38\.'; then
+  log " - Detected L4T $L4T_VER (38.x): skipping snapd pin/hold"
+elif [ "$L4T_VER" = "36.4.4" ]; then
+  log " - Detected L4T 36.4.4: forcing snapd 2.68.5 and holding"
+  snap download snapd --revision=24724 || true
+  snap ack snapd_24724.assert 2>/dev/null || true
+  snap install snapd_24724.snap || true
+  snap refresh --hold snapd || true
+  rm -f snapd_24724.assert snapd_24724.snap || true
+else
+  log " - L4T version '${L4T_VER:-unknown}' not explicitly handled; not pinning snapd"
+fi
 
 log "24) Remove preinstalled games (apt & snap)"
 
@@ -888,7 +984,7 @@ if [ -d "$TARGET_DIR" ]; then
   log " - $TARGET_DIR already exists; skipping clone and install.sh"
 else
   log " - Cloning jetson-containers"
-  sudo -u "$USERNAME" git clone https://github.com/robertZaufall/jetson-containers "$TARGET_DIR" || true
+  sudo -u "$USERNAME" git clone https://github.com/dusty-nv/jetson-containers "$TARGET_DIR" || true
   # Run install.sh if present after clone
   if [ -x "$TARGET_DIR/install.sh" ]; then
     sudo -u "$USERNAME" bash -lc "cd '$TARGET_DIR' && ./install.sh" || true
