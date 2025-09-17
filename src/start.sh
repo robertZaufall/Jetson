@@ -2,13 +2,19 @@
 
 set -euo pipefail
 
+# Require root
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  echo "ERROR: this script must be run as root (use sudo)." >&2
+  exit 1
+fi
+
 REBOOT=${REBOOT:-0}
 REG_IP=${REG_IP:-${REG:-}}
 for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
-    --vnc-backend=*) VNC_BACKEND="${arg#*=}" ;;
+    --vnc-backend=*) VNC_BACKEND="${arg#*=}" ; VNC_BACKEND_SET=1 ;;
     --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ; VNC_ENCRYPTION_EXPLICIT=1 ;;
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
@@ -32,6 +38,25 @@ apt_install_retry() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "$@" || return 1
 }
 
+# Detect L4T version (e.g., 36.4.4 or 38.2.0) -> L4T_MAJOR/L4T_MINOR
+detect_l4t() {
+  local ver
+  if ver=$(dpkg-query -W -f='${Version}\n' nvidia-l4t-core 2>/dev/null | head -n1); then
+    :
+  elif [ -f /etc/nv_tegra_release ]; then
+    # Format: # R36 (release), REVISION: 4.4, GCID: ...
+    ver=$(awk -F'[ ,:]+' '/^# R[0-9]+/ {gsub("R","",$2); gsub("REVISION","",$4); print $2"."$5}' /etc/nv_tegra_release 2>/dev/null || true)
+  fi
+  echo "$ver"
+}
+
+L4T_VERSION_RAW="$(detect_l4t)"
+L4T_MAJOR=0; L4T_MINOR=0
+if [ -n "$L4T_VERSION_RAW" ]; then
+  L4T_MAJOR=$(printf '%s' "$L4T_VERSION_RAW" | sed -n 's/^\([0-9]\+\)\..*/\1/p')
+  L4T_MINOR=$(printf '%s' "$L4T_VERSION_RAW" | sed -n 's/^[0-9]\+\.\([0-9]\+\).*/\1/p')
+fi
+
 have_user_bus() {
   # Args: uid
   local uid="$1"; local bus="/run/user/${uid}/bus"
@@ -46,9 +71,16 @@ gsettings_has_key() {
   local schema="$1" key="$2"
   gsettings list-keys "$schema" 2>/dev/null | grep -qx "$key"
 }
-VNC_BACKEND=${VNC_BACKEND:-grd}
+VNC_BACKEND_SET=${VNC_BACKEND_SET:-0}
+# Default to X11-only VNC (x11vnc). Wayland/GRD not used for VNC.
+if [ "${VNC_BACKEND_SET}" -eq 0 ]; then
+  VNC_BACKEND="x11vnc"
+fi
+VNC_BACKEND=${VNC_BACKEND:-x11vnc}
 VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 # Auto-default swap size to 8G (8GB RAM) or 16G (16GB RAM) when not set
+log "Target L4T: ${L4T_MAJOR}.${L4T_MINOR} (raw: ${L4T_VERSION_RAW:-unknown}); VNC backend: ${VNC_BACKEND}"
+
 if [ -z "${SWAP_SIZE:-}" ]; then
   mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
   if [ "$mem_kb" -ge $((12*1024*1024)) ]; then
@@ -164,6 +196,8 @@ idle-delay=uint32 0
 [org/gnome/desktop/screensaver]
 lock-enabled=false
 idle-activation-enabled=false
+lock-delay=uint32 0
+ubuntu-lock-on-suspend=false
 
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
@@ -171,17 +205,23 @@ sleep-inactive-ac-timeout=0
 sleep-inactive-battery-type='nothing'
 sleep-inactive-battery-timeout=0
 idle-dim=false
+
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
 EOF
 install -d -m 0755 /etc/dconf/db/local.d/locks
 cat >/etc/dconf/db/local.d/locks/00-nosleep-locks <<'EOF'
 /org/gnome/desktop/session/idle-delay
 /org/gnome/desktop/screensaver/lock-enabled
 /org/gnome/desktop/screensaver/idle-activation-enabled
+/org/gnome/desktop/screensaver/lock-delay
+/org/gnome/desktop/screensaver/ubuntu-lock-on-suspend
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
 /org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
 /org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/desktop/lockdown/disable-lock-screen
 EOF
 dconf update || true
 
@@ -201,6 +241,15 @@ idle-delay=uint32 0
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 idle-dim=false
+
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+lock-delay=uint32 0
+ubuntu-lock-on-suspend=false
 EOF
 dconf update || true
 
@@ -239,6 +288,60 @@ cat >/etc/xdg/autostart/99-x11-noblank.desktop <<'EOF'
 Type=Application
 Name=Disable X11 screen blanking
 Exec=/usr/local/bin/disable-dpms-x11
+X-GNOME-Autostart-enabled=true
+EOF
+
+# Wayland/Xorg: inhibit idle/lock at the session level as a belt-and-suspenders fix (GNOME 46+)
+cat >/usr/local/bin/gnome-inhibit-idle <<'EOF'
+#!/bin/sh
+# Require GNOME session
+if [ "${XDG_CURRENT_DESKTOP#*GNOME}" != "$XDG_CURRENT_DESKTOP" ] || [ "$XDG_CURRENT_DESKTOP" = "GNOME" ]; then
+  exec gnome-session-inhibit \
+    --inhibit logout \
+    --inhibit switch-user \
+    --inhibit suspend \
+    --inhibit idle \
+    --reason "Prevent idle/lock" \
+    sleep infinity
+fi
+exit 0
+EOF
+chmod +x /usr/local/bin/gnome-inhibit-idle
+cat >/etc/xdg/autostart/90-gnome-inhibit-idle.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Prevent screen lock/idle
+Exec=/usr/local/bin/gnome-inhibit-idle
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true
+EOF
+
+# Also ensure user-level settings at login in case profiles aren’t applied yet
+cat >/usr/local/bin/gnome-ensure-no-lock <<'EOF'
+#!/bin/sh
+set -e
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+gsettings set org.gnome.desktop.session idle-delay 0 || true
+gsettings set org.gnome.desktop.screensaver lock-enabled false || true
+gsettings set org.gnome.desktop.screensaver idle-activation-enabled false || true
+gsettings set org.gnome.desktop.screensaver lock-delay 0 || true
+gsettings set org.gnome.desktop.screensaver ubuntu-lock-on-suspend false || true
+gsettings set org.gnome.desktop.lockdown disable-lock-screen true || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 0 || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 0 || true
+gsettings set org.gnome.settings-daemon.plugins.power idle-dim false || true
+exit 0
+EOF
+chmod +x /usr/local/bin/gnome-ensure-no-lock
+cat >/etc/xdg/autostart/91-gnome-ensure-no-lock.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Ensure no lock settings
+Exec=/usr/local/bin/gnome-ensure-no-lock
+OnlyShowIn=GNOME;
 X-GNOME-Autostart-enabled=true
 EOF
 
@@ -374,40 +477,81 @@ unencrypted on disk. Change this policy if you need encryption.
 EOF
 
 
-if [ -n "${VNC_PASSWORD:-}" ]; then
+if true; then
   log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
   USER_UID=$(id -u "$USERNAME")
   USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
   USER_BUS="/run/user/${USER_UID}/bus"
   TIMEOUT="timeout 10s"
 
-  if [ "${VNC_BACKEND}" = "grd" ]; then
+    # Force X11-only VNC regardless of requested backend
+    if [ "${VNC_BACKEND}" != "x11vnc" ]; then
+      log " - Forcing VNC backend to x11vnc (Xorg only); ignoring Wayland/GRD for VNC."
+      VNC_BACKEND="x11vnc"
+    fi
+
+  if false; then  # GRD-based VNC path disabled (Wayland removed for VNC)
     # --- GNOME Remote Desktop (VNC) ---
     # Install required tools with retries; tolerate offline installs gracefully
     if ! apt_install_retry gnome-remote-desktop libsecret-tools; then
       log " - WARNING: could not install libsecret-tools/gnome-remote-desktop (temporary network/DNS issue?)."
       log "           Continuing without them; will finalize on next online GUI login."
     fi
-    # Ensure Wayland is enabled in GDM for GNOME Remote Desktop (VNC) to function correctly
-    GDM_CONF="/etc/gdm3/custom.conf"
-    if [ -f "$GDM_CONF" ]; then
-      if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
-        sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=true/' "$GDM_CONF" || true
-      else
-        # Make sure the [daemon] section exists and append the setting
-        grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
-        printf 'WaylandEnable=true\n' >> "$GDM_CONF"
+    # Detect early if GRD provides VNC (controls whether we force Wayland)
+    GRD_VNC_AVAILABLE=0
+    if command -v grdctl >/dev/null 2>&1; then
+      if $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --help 2>/dev/null | grep -qiE '^\s*vnc\b'; then
+        GRD_VNC_AVAILABLE=1
       fi
-      log " - Enabled Wayland in GDM (WaylandEnable=true) for GNOME Remote Desktop VNC. Log out/in (or reboot) to apply."
-    fi
-    # VNC protocol uses only the first 8 **bytes** (DES). Force ASCII and 8 bytes for broad client compatibility (e.g., RealVNC).
-    VNC_PASS8="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)"
-    if [ -z "$VNC_PASS8" ]; then
-      log " - WARNING: Provided VNC password had no ASCII bytes; falling back to first 8 characters."
-      VNC_PASS8="${VNC_PASSWORD:0:8}"
     fi
 
+    # On L4T 38.x+, enforce Wayland for GNOME Remote Desktop VNC only if VNC is available
+    if [ "$L4T_MAJOR" -ge 38 ] && [ "$GRD_VNC_AVAILABLE" -eq 1 ]; then
+      GDM_CONF="/etc/gdm3/custom.conf"
+      if [ -f "$GDM_CONF" ]; then
+        if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
+          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=true/' "$GDM_CONF" || true
+        else
+          # Make sure the [daemon] section exists and append the setting
+          grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
+          printf 'WaylandEnable=true\n' >> "$GDM_CONF"
+        fi
+        log " - Enabled Wayland in GDM (WaylandEnable=true) for GNOME Remote Desktop VNC. Log out/in (or reboot) to apply."
+      fi
+
+      # Also ensure the user's session selects a Wayland session (avoid Xorg fallback)
+      # Prefer explicit 'ubuntu-wayland' if present, else 'ubuntu', else 'gnome'
+      WAYLAND_SESSION=""
+      if [ -f /usr/share/wayland-sessions/ubuntu-wayland.desktop ]; then WAYLAND_SESSION=ubuntu-wayland; fi
+      if [ -z "$WAYLAND_SESSION" ] && [ -f /usr/share/wayland-sessions/ubuntu.desktop ]; then WAYLAND_SESSION=ubuntu; fi
+      if [ -z "$WAYLAND_SESSION" ] && [ -f /usr/share/wayland-sessions/gnome.desktop ]; then WAYLAND_SESSION=gnome; fi
+      if [ -n "$WAYLAND_SESSION" ]; then
+        ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
+        install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
+        touch "$ACCOUNTS_USER_FILE"
+        if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
+          # Remove any XSession= (Xorg) lines and set Session=<wayland-session>
+          sed -i -E '/^XSession=/d' "$ACCOUNTS_USER_FILE" || true
+          if grep -q '^Session=' "$ACCOUNTS_USER_FILE"; then
+            sed -i -E "s/^Session=.*/Session=${WAYLAND_SESSION}/" "$ACCOUNTS_USER_FILE" || true
+          else
+            printf 'Session=%s\n' "$WAYLAND_SESSION" >> "$ACCOUNTS_USER_FILE"
+          fi
+        else
+          printf '[User]\nSession=%s\n' "$WAYLAND_SESSION" > "$ACCOUNTS_USER_FILE"
+        fi
+        log " - AccountsService: set Session=${WAYLAND_SESSION} for user $USERNAME (Wayland)"
+      fi
+    fi
+    # Prepare passwords
+    VNC_PASS8="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)"
+    [ -n "$VNC_PASS8" ] || VNC_PASS8="${VNC_PASSWORD:0:8}"
+    RDP_PASS="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]')"
+
     DEFER_GRD=0
+
+    # Reconfirm VNC availability (in case help changed after package install)
+    GRD_VNC_AVAILABLE=$GRD_VNC_AVAILABLE
 
     # If there is no user D-Bus session yet OR the user session bus is not responding OR
     # gnome-remote-desktop is not active, defer setup to the next GUI login to avoid blocking here.
@@ -457,6 +601,7 @@ EODSK
 
     if [ "$DEFER_GRD" -eq 0 ]; then
     if command -v grdctl >/dev/null 2>&1; then
+      if [ "$GRD_VNC_AVAILABLE" -eq 1 ]; then
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
@@ -469,108 +614,41 @@ EODSK
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
       fi
       printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc | grep -qx encryption'; then
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption'; then
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
       fi
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
       $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl status || true
-    else
-      # Fallback to gsettings + secret-tool
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc | grep -qx encryption'; then
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
-      fi
-      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-    fi
+      else
+        log " - GNOME Remote Desktop VNC not available. Falling back to legacy x11vnc on Xorg."
+        # Prefer Xorg session for reliability with x11vnc
+        ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
+        install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
+        touch "$ACCOUNTS_USER_FILE"
+        XORG_SESSION=""
+        if [ -f /usr/share/xsessions/ubuntu-xorg.desktop ]; then XORG_SESSION=ubuntu-xorg; fi
+        if [ -z "$XORG_SESSION" ] && [ -f /usr/share/xsessions/ubuntu.desktop ]; then XORG_SESSION=ubuntu; fi
+        if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
+          sed -i -E '/^(Session|XSession)=/d' "$ACCOUNTS_USER_FILE" || true
+          printf 'XSession=%s\n' "${XORG_SESSION:-ubuntu}" >> "$ACCOUNTS_USER_FILE"
+        else
+          printf '[User]\nXSession=%s\n' "${XORG_SESSION:-ubuntu}" > "$ACCOUNTS_USER_FILE"
+        fi
+        # Force Xorg in GDM (disable Wayland)
+        if [ -f /etc/gdm3/custom.conf ]; then
+          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=false/' /etc/gdm3/custom.conf || true
+        fi
 
-    fi
-
-    # Ensure gnome-remote-desktop starts after the keyring is available (prevents password reset on boot)
-    sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user/gnome-remote-desktop.service.d"
-    sudo -u "$USERNAME" tee "$HOME_DIR/.config/systemd/user/gnome-remote-desktop.service.d/override.conf" >/dev/null <<'EOC'
-[Unit]
-After=gnome-keyring-daemon.service graphical-session.target
-Wants=gnome-keyring-daemon.service
-EOC
-    if [ "$DEFER_GRD" -eq 0 ]; then
-      $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload 2>/dev/null || true
-      $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now gnome-remote-desktop.service 2>/dev/null || true
-    fi
-
-    # Create a user service to (re)seed the VNC password after session & keyring are up
-    sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user"
-    sudo -u "$USERNAME" tee "$HOME_DIR/.config/systemd/user/grd-ensure-vnc-pass.service" >/dev/null <<'EOUNIT'
-[Unit]
-Description=Ensure GNOME Remote Desktop VNC password is set
-After=gnome-keyring-daemon.service graphical-session.target
-Wants=gnome-keyring-daemon.service
-
-[Service]
-Type=oneshot
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
-Environment=XDG_RUNTIME_DIR=%t
-ExecStart=/bin/sh -lc '
-  PASS_FILE="$HOME/.config/gnome-remote-desktop.vncpass";
-  [ -f "$PASS_FILE" ] || exit 0;
-  PASS=$(head -n1 "$PASS_FILE");
-  [ -n "$PASS" ] || exit 0;
-
-  grdctl vnc set-auth-method password || true;
-  grdctl vnc disable-view-only || true;
-  grdctl vnc enable || true;
-  # Disable VNC encryption for broad client compatibility (e.g., RealVNC)
-  if gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption; then
-    gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true;
-  fi
-
-  if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || grdctl --headless vnc set-password "$PASS" || true; else grdctl vnc set-password "$PASS" || true; fi;
-
-  systemctl --user enable --now gnome-remote-desktop.service || true;
-  systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true;
-'
-
-[Install]
-WantedBy=default.target
-EOUNIT
-    if [ "$DEFER_GRD" -eq 0 ]; then
-      $TIMEOUT sudo -u "$USERNAME" systemctl --user daemon-reload 2>/dev/null || true
-    fi
-
-    # Persist the chosen password to the user's config for the ensure service (permissions 600)
-    sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config"
-    sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" "'"$VNC_PASS8"'" > "$HOME/.config/gnome-remote-desktop.vncpass"'
-
-    # Enable the ensure service to run at each login (defer if no user bus)
-    if [ "$DEFER_GRD" -eq 0 ]; then
-      $TIMEOUT sudo -u "$USERNAME" systemctl --user enable --now grd-ensure-vnc-pass.service 2>/dev/null || true
-    else
-      # Offline-enable by creating the wants symlink so it's active on next login
-      sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.config/systemd/user/default.target.wants" || true
-      sudo -u "$USERNAME" ln -sf "$HOME_DIR/.config/systemd/user/grd-ensure-vnc-pass.service" \
-        "$HOME_DIR/.config/systemd/user/default.target.wants/grd-ensure-vnc-pass.service" || true
-    fi
-
-    # If linger was enabled earlier, it can start the service too early (before keyring). Disable it to avoid random password regeneration.
-    if loginctl show-user "$USERNAME" -p Linger 2>/dev/null | grep -q '=yes'; then
-      loginctl disable-linger "$USERNAME" || true
-    fi
-
-    # Avoid port conflicts with legacy x11vnc
-    systemctl disable --now x11vnc.service 2>/dev/null || true
-
-    else
-      # --- Legacy x11vnc backend (shares X11 :0) ---
-      apt-get install -y x11vnc || true
-
-      # Always (re)set password when provided
-      echo "$VNC_PASSWORD" | x11vnc -storepasswd stdin /etc/x11vnc.pass >/dev/null 2>&1 || true
-      chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
-
-      cat >/etc/systemd/system/x11vnc.service <<'EOF'
+        # Install and configure x11vnc
+        apt_install_retry x11vnc || true
+        x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
+        chmod 600 /etc/x11vnc.pass 2>/dev/null || true
+        chown root:root /etc/x11vnc.pass 2>/dev/null || true
+        printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+        chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+      AUTH_FILE="/run/user/${USER_UID}/gdm/Xauthority"; [ -f "$AUTH_FILE" ] || AUTH_FILE="$HOME_DIR/.Xauthority"
+      cat >/etc/systemd/system/x11vnc.service <<EOF
 [Unit]
 Description=Legacy VNC server for X11 (x11vnc)
 Requires=display-manager.service
@@ -580,7 +658,108 @@ After=display-manager.service graphical.target
 Type=simple
 Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 120); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; done; exit 1'
-ExecStart=/usr/bin/x11vnc -display :0 -auth guess -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log
+ExecStart=/usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now x11vnc.service || true
+        # Disable GRD services to avoid conflicts/confusion
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+        # Open firewall for VNC
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+          ufw allow 5900/tcp || true
+        fi
+      fi
+    else
+      # Fallback to gsettings + secret-tool
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
+      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption'; then
+        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
+      fi
+      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
+      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+    fi
+
+    fi
+
+    # GRD-only setup removed for VNC
+
+    else
+      # --- X11-only VNC backend (x11vnc, shares X11 :0) ---
+      # Ensure system uses Xorg for the login/user session
+      GDM_CONF="/etc/gdm3/custom.conf"
+      if [ -f "$GDM_CONF" ]; then
+        if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
+          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=false/' "$GDM_CONF" || true
+        else
+          grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
+          printf 'WaylandEnable=false\n' >> "$GDM_CONF"
+        fi
+      fi
+      ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
+      install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
+      touch "$ACCOUNTS_USER_FILE"
+      XORG_SESSION=""
+      if [ -f /usr/share/xsessions/ubuntu-xorg.desktop ]; then XORG_SESSION=ubuntu-xorg; fi
+      if [ -z "$XORG_SESSION" ] && [ -f /usr/share/xsessions/ubuntu.desktop ]; then XORG_SESSION=ubuntu; fi
+      if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
+        sed -i -E '/^(Session|XSession)=/d' "$ACCOUNTS_USER_FILE" || true
+        printf 'XSession=%s\n' "${XORG_SESSION:-ubuntu}" >> "$ACCOUNTS_USER_FILE"
+      else
+        printf '[User]\nXSession=%s\n' "${XORG_SESSION:-ubuntu}" > "$ACCOUNTS_USER_FILE"
+      fi
+
+      apt_install_retry x11vnc || true
+
+      # Determine VNC password: use --vnc-password, else existing seed, else existing system pass, else generate
+      VNC_PASS8="${VNC_PASSWORD:-}"
+      if [ -z "$VNC_PASS8" ] && [ -s "$HOME_DIR/.config/gnome-remote-desktop.vncpass" ]; then
+        VNC_PASS8=$(head -n1 "$HOME_DIR/.config/gnome-remote-desktop.vncpass")
+      fi
+      if [ -n "$VNC_PASS8" ]; then
+        VNC_PASS8=$(printf '%s' "$VNC_PASS8" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)
+      fi
+      if [ -z "$VNC_PASS8" ] && [ -f /etc/x11vnc.pass ]; then
+        : # leave existing password file in place
+      else
+        if [ -z "$VNC_PASS8" ]; then
+          VNC_PASS8=$(head -c 16 /dev/urandom | tr -cd 'A-Za-z0-9' | cut -c1-8)
+          log " - Generated VNC password: ${VNC_PASS8} (stored to /etc/x11vnc.pass)"
+          echo "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt"; chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" || true
+        fi
+        # Store the VNC password hash deterministically (avoid stdin/verify pitfalls)
+        x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
+        # Record the effective 8-char VNC password for reference (insecure; stored in user config)
+        printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+        chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+      fi
+      chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
+
+      # Detect Xauthority file for display :0
+      AUTH_FILE="/run/user/${USER_UID}/gdm/Xauthority"
+      if [ ! -f "$AUTH_FILE" ] && [ -f "$HOME_DIR/.Xauthority" ]; then AUTH_FILE="$HOME_DIR/.Xauthority"; fi
+
+      # Write unit with a quoted heredoc to avoid accidental expansions
+      cat >/etc/systemd/system/x11vnc.service <<'EOF'
+[Unit]
+Description=Legacy VNC server for X11 (x11vnc)
+Requires=display-manager.service
+After=display-manager.service graphical.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+ExecStartPre=/bin/sh -c 'i=0; while [ "$i" -lt 120 ]; do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; i=$((i+1)); done; exit 1'
+EOF
+      printf 'ExecStart=/usr/bin/x11vnc -display :0 -auth "%s" -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log\n' "$AUTH_FILE" >> /etc/systemd/system/x11vnc.service
+      cat >>/etc/systemd/system/x11vnc.service <<'EOF'
 Restart=always
 RestartSec=2
 
@@ -593,6 +772,8 @@ EOF
 
       # Stop GNOME Remote Desktop to avoid port conflict
       sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
+      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+      log " - Set GDM to Xorg (WaylandEnable=false) and selected Xorg session. Reboot or log out/in to apply."
     fi
 
   # Open firewall for VNC
