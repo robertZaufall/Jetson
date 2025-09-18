@@ -939,10 +939,23 @@ fi
 log "16) Install jetson-stats (jtop) and patch version mapping"
 if ! python3 -c "import jtop" >/dev/null 2>&1; then
   apt-get install -y python3-pip
-  # On Ubuntu 24.04+ with PEP 668, pip requires --break-system-packages for system installs
-  pip3 install -U jetson-stats --break-system-packages
-  systemctl daemon-reload || true
-  systemctl restart jtop.service || true
+  # Try install without special flags first (works on L4T 36.x / Ubuntu 22.04)
+  if ! python3 -m pip install -U jetson-stats >/dev/null 2>&1; then
+    # On Ubuntu 24.04+ with PEP 668, pip requires --break-system-packages
+    if python3 -m pip help install 2>/dev/null | grep -q -- "--break-system-packages"; then
+      python3 -m pip install -U jetson-stats --break-system-packages
+    else
+      echo "WARNING: pip install failed and --break-system-packages not supported by this pip." >&2
+      echo "         Consider upgrading pip or using a virtualenv if install keeps failing." >&2
+    fi
+  fi
+  # Verify install and start service if present
+  if python3 -c "import jtop; print(jtop.__version__)" >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl restart jtop.service || true
+  else
+    echo "ERROR: jtop (jetson-stats) failed to install" >&2
+  fi
 fi
 
 # Patch jetson-stats to map L4T 36.4.4 -> JetPack 6.2.1
