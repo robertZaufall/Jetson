@@ -742,11 +742,130 @@ EOF
       fi
       chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
 
-      # Detect Xauthority file for display :0
-      AUTH_FILE="/run/user/${USER_UID}/gdm/Xauthority"
-      if [ ! -f "$AUTH_FILE" ] && [ -f "$HOME_DIR/.Xauthority" ]; then AUTH_FILE="$HOME_DIR/.Xauthority"; fi
+      # Create a wrapper that discovers the active user DISPLAY dynamically
+      cat >/usr/local/sbin/x11vnc-wrapper.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VNC_PASS_FILE="/etc/x11vnc.pass"
+LOG_FILE="/var/log/x11vnc.log"
 
-      # Write unit with a quoted heredoc to avoid accidental expansions
+# Prefer the primary interactive user configured at install time
+PREFERRED_USER="__PREFERRED_USER__"
+
+# Resolve target session and DISPLAY via loginctl (most reliable)
+resolve_display() {
+  local user="$1"
+  local sid disp type state
+  while read -r sid _ usr _; do
+    [ "$usr" = "$user" ] || continue
+    type=$(loginctl show-session "$sid" -p Type 2>/dev/null | cut -d= -f2)
+    state=$(loginctl show-session "$sid" -p State 2>/dev/null | cut -d= -f2)
+    disp=$(loginctl show-session "$sid" -p Display 2>/dev/null | cut -d= -f2)
+    if [ "$type" = "x11" ] && [ "$state" = "active" ] && [ -n "$disp" ]; then
+      printf '%s\n' "$disp"
+      return 0
+    fi
+  done < <(loginctl list-sessions --no-legend 2>/dev/null)
+  return 1
+}
+
+# Pick a user: preferred non-gdm user, else first non-gdm with an active x11 session
+USER_NAME=""
+if [ -n "$PREFERRED_USER" ] && [ "$PREFERRED_USER" != "gdm" ]; then
+  USER_NAME="$PREFERRED_USER"
+fi
+if [ -z "$USER_NAME" ]; then
+  USER_NAME=$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3!="gdm" {print $3; exit}')
+fi
+[ -n "$USER_NAME" ] || USER_NAME="$(id -nu 1000 2>/dev/null || echo jetson)"
+USER_UID=$(id -u "$USER_NAME")
+HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
+
+DISPLAY_VAL=""
+if ! DISPLAY_VAL=$(resolve_display "$USER_NAME"); then
+  # Fallback to reading gnome-shell env if loginctl provided none
+  if pid=$(pgrep -u "$USER_NAME" -x gnome-shell | head -n1 2>/dev/null || true); then
+    if [ -r "/proc/$pid/environ" ]; then
+      DISPLAY_VAL=$(tr '\0' '\n' </proc/$pid/environ | awk -F= '$1=="DISPLAY"{print $2; exit}')
+      [ -n "$DISPLAY_VAL" ] || DISPLAY_VAL=":0"
+    fi
+  fi
+fi
+[ -n "$DISPLAY_VAL" ] || DISPLAY_VAL=":0"
+
+# If the chosen DISPLAY socket doesn't exist, prefer the highest X socket available (e.g., :1 over :0)
+sock="/tmp/.X11-unix/X${DISPLAY_VAL#:}"
+if [ ! -S "$sock" ]; then
+  best=""
+  for s in /tmp/.X11-unix/X*; do
+    [ -S "$s" ] || continue
+    n=${s##*/X}
+    case "$n" in (*[!0-9]*) continue;; esac
+    if [ -z "$best" ] || [ "$n" -gt "$best" ]; then best="$n"; fi
+  done
+  if [ -n "$best" ]; then DISPLAY_VAL=":$best"; sock="/tmp/.X11-unix/X$best"; fi
+fi
+
+# Wait for matching X socket
+for i in $(seq 1 120); do
+  [ -S "$sock" ] && break
+  sleep 1
+done
+
+# Determine XAUTHORITY (prefer user's cookie)
+AUTH_ENV=""
+if pid=$(pgrep -u "$USER_NAME" -x gnome-shell | head -n1 2>/dev/null || true); then
+  if [ -r "/proc/$pid/environ" ]; then
+    AUTH_ENV=$(tr '\0' '\n' </proc/$pid/environ | awk -F= '$1=="XAUTHORITY"{print $2; exit}')
+  fi
+fi
+
+# Try to extract the exact cookie for the chosen DISPLAY into a temporary auth file
+AUTH_TMP="/run/x11vnc.${USER_UID}.auth"
+rm -f "$AUTH_TMP" 2>/dev/null || true
+if [ -n "$AUTH_ENV" ] && [ -f "$AUTH_ENV" ]; then
+  su -s /bin/sh - "$USER_NAME" -c "XAUTHORITY='$AUTH_ENV' xauth extract '$AUTH_TMP' '$DISPLAY_VAL'" >>"$LOG_FILE" 2>&1 || true
+fi
+if [ ! -s "$AUTH_TMP" ] && [ -f "$HOME_DIR/.Xauthority" ]; then
+  su -s /bin/sh - "$USER_NAME" -c "XAUTHORITY='$HOME_DIR/.Xauthority' xauth extract '$AUTH_TMP' '$DISPLAY_VAL'" >>"$LOG_FILE" 2>&1 || true
+fi
+chmod 600 "$AUTH_TMP" 2>/dev/null || true
+
+# Final AUTH_FILE selection
+AUTH_FILE="$AUTH_TMP"
+if [ ! -s "$AUTH_FILE" ]; then
+  AUTH_FILE="$HOME_DIR/.Xauthority"
+fi
+if [ ! -f "$AUTH_FILE" ]; then
+  AUTH_FILE="/run/user/${USER_UID}/gdm/Xauthority"
+fi
+
+# Log selection for troubleshooting
+{
+  echo "[x11vnc-wrapper] USER=$USER_NAME UID=$USER_UID HOME=$HOME_DIR"
+  echo "[x11vnc-wrapper] DISPLAY=$DISPLAY_VAL AUTH=$AUTH_FILE"
+} >> "$LOG_FILE" 2>&1 || true
+
+# Allow root to access the user's X server via xhost (avoids cookie mismatch)
+su -s /bin/sh - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAL' XAUTHORITY='${AUTH_ENV:-$HOME_DIR/.Xauthority}' xhost +SI:localuser:root" >>"$LOG_FILE" 2>&1 || true
+
+# Build optional auth flag only if we have a non-empty cookie file
+AUTH_OPT=""
+if [ -s "$AUTH_FILE" ]; then AUTH_OPT="-auth $AUTH_FILE"; fi
+
+# Run x11vnc pinned to the resolved DISPLAY with optional auth
+exec /usr/bin/x11vnc \
+  -display "$DISPLAY_VAL" \
+  $AUTH_OPT \
+  -forever -loop -noxdamage -repeat -xrandr \
+  -rfbauth "$VNC_PASS_FILE" -rfbport 5900 -shared \
+  -o "$LOG_FILE"
+EOF
+      # Inject the preferred user into the wrapper to avoid attaching to gdm
+      sed -i -E "s#__PREFERRED_USER__#${USERNAME}#" /usr/local/sbin/x11vnc-wrapper.sh
+      chmod 0755 /usr/local/sbin/x11vnc-wrapper.sh
+
+      # Systemd unit using the wrapper
       cat >/etc/systemd/system/x11vnc.service <<'EOF'
 [Unit]
 Description=Legacy VNC server for X11 (x11vnc)
@@ -755,11 +874,7 @@ After=display-manager.service graphical.target
 
 [Service]
 Type=simple
-Environment=DISPLAY=:0
-ExecStartPre=/bin/sh -c 'i=0; while [ "$i" -lt 120 ]; do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; i=$((i+1)); done; exit 1'
-EOF
-      printf 'ExecStart=/usr/bin/x11vnc -display :0 -auth "%s" -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log\n' "$AUTH_FILE" >> /etc/systemd/system/x11vnc.service
-      cat >>/etc/systemd/system/x11vnc.service <<'EOF'
+ExecStart=/usr/local/sbin/x11vnc-wrapper.sh
 Restart=always
 RestartSec=2
 
@@ -921,7 +1036,7 @@ if command -v git >/dev/null 2>&1; then
   done < <(find "$HOME_DIR" -type d -name .git -prune -print0 2>/dev/null)
 fi
 
-log "19) Set Jetson power mode to MAXN (nvpmodel)"
+log "19) Set Jetson power mode (Thor=1/120W, others=MAXN)"
 if command -v nvpmodel >/dev/null 2>&1; then
   MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
   IS_ORIN_NX_OR_NANO=0
@@ -929,36 +1044,43 @@ if command -v nvpmodel >/dev/null 2>&1; then
   IS_THOR=0
   echo "$MODEL" | grep -Eiq 'Thor' && IS_THOR=1
 
-  # Default desired mode is 0; for Thor (not Orin NX/Nano) use 1 per platform mapping
-  DESIRED_MODE=0
   if [ "$IS_THOR" -eq 1 ] && [ "$IS_ORIN_NX_OR_NANO" -eq 0 ]; then
-    DESIRED_MODE=1
-  fi
-
-  if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-    log " - Power mode already MAXN; skipping."
-  else
-    # Try desired mode first
-    if timeout 5s nvpmodel -m "$DESIRED_MODE" >/dev/null 2>&1; then
+    # Jetson AGX Thor: always set mode 1 (120W)
+    if timeout 5s nvpmodel -m 1 >/dev/null 2>&1; then
       sleep 1
-    fi
-    if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-      log " - Set power mode to MAXN via nvpmodel -m $DESIRED_MODE (model: ${MODEL:-unknown})"
+      log " - Set AGX Thor nvpmodel mode to 1 (120W)"
+      # Show the reported status for visibility (output format can vary)
+      timeout 5s nvpmodel -q 2>/dev/null || true
     else
-      # Fallback: brute-force through modes 0-9 until MAXN is found
-      for id in 0 1 2 3 4 5 6 7 8 9; do
-        if timeout 5s nvpmodel -m "$id" >/dev/null 2>&1; then
-          sleep 1
-          if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-            log " - Set power mode to MAXN via nvpmodel -m $id (fallback)"
-            break
+      log " - WARNING: failed to set nvpmodel mode 1 on Thor"
+    fi
+  else
+    # Orin NX/Nano and others on L4T 36.x: try to select MAXN profile
+    if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+      log " - Power mode already MAXN; skipping."
+    else
+      # Commonly MAXN is mode 0 on Orin NX/Nano
+      if timeout 5s nvpmodel -m 0 >/dev/null 2>&1; then
+        sleep 1
+      fi
+      if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+        log " - Set power mode to MAXN via nvpmodel -m 0 (model: ${MODEL:-unknown})"
+      else
+        # Fallback: brute-force through modes 0-9 until MAXN is found
+        for id in 1 2 3 4 5 6 7 8 9; do
+          if timeout 5s nvpmodel -m "$id" >/dev/null 2>&1; then
+            sleep 1
+            if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+              log " - Set power mode to MAXN via nvpmodel -m $id (fallback)"
+              break
+            fi
           fi
+        done
+        if ! timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
+          log " - WARNING: Could not detect MAXN after trying modes 0-9. Reported status:"
+          timeout 5s nvpmodel -q 2>/dev/null || true
+          log "   Check /etc/nvpmodel.conf for mode numbers."
         fi
-      done
-      if ! timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
-        log " - WARNING: Could not set MAXN automatically. Available modes:"
-        timeout 5s nvpmodel -q 2>/dev/null || true
-        log "   You may need to check /etc/nvpmodel.conf for mode numbers."
       fi
     fi
   fi
