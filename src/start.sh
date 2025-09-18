@@ -171,7 +171,11 @@ if ! apt_install_retry openssh-server dconf-cli libglib2.0-bin nano btop curl gi
 fi
 git lfs install --system || true
 systemctl enable --now ssh || true
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow OpenSSH || true; fi
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ! ufw status 2>/dev/null | grep -qE '(^|[[:space:]])OpenSSH([[:space:]]|$)'; then
+    ufw allow OpenSSH || true
+  fi
+fi
 
 # 1) Install NVIDIA JetPack SDK meta-package
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
@@ -670,9 +674,11 @@ EOF
         # Disable GRD services to avoid conflicts/confusion
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
         $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-        # Open firewall for VNC
+        # Open firewall for VNC (guard against duplicates)
         if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-          ufw allow 5900/tcp || true
+          if ! ufw status 2>/dev/null | grep -q '5900/tcp'; then
+            ufw allow 5900/tcp || true
+          fi
         fi
       fi
     else
@@ -891,9 +897,11 @@ EOF
       log " - Set GDM to Xorg (WaylandEnable=false) and selected Xorg session. Reboot or log out/in to apply."
     fi
 
-  # Open firewall for VNC
+  # Open firewall for VNC (guard against duplicates)
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow 5900/tcp || true
+    if ! ufw status 2>/dev/null | grep -q '5900/tcp'; then
+      ufw allow 5900/tcp || true
+    fi
   fi
 else
   log "13) VNC: no changes (run with --vnc-password=... to modify VNC settings)"
@@ -937,24 +945,129 @@ fi
 
 
 log "16) Install jetson-stats (jtop) and patch version mapping"
-if ! python3 -c "import jtop" >/dev/null 2>&1; then
-  apt-get install -y python3-pip
-  # Try install without special flags first (works on L4T 36.x / Ubuntu 22.04)
-  if ! python3 -m pip install -U jetson-stats >/dev/null 2>&1; then
-    # On Ubuntu 24.04+ with PEP 668, pip requires --break-system-packages
-    if python3 -m pip help install 2>/dev/null | grep -q -- "--break-system-packages"; then
-      python3 -m pip install -U jetson-stats --break-system-packages
-    else
-      echo "WARNING: pip install failed and --break-system-packages not supported by this pip." >&2
-      echo "         Consider upgrading pip or using a virtualenv if install keeps failing." >&2
-    fi
+# Thor (L4T 38.x): install jtop in a dedicated venv under /opt/jtop without --break-system-packages
+if [ "${L4T_MAJOR:-0}" -ge 38 ]; then
+  log " - Detected Thor (L4T ${L4T_VERSION:-unknown}); installing jtop in /opt/jtop virtualenv"
+  # Ensure prerequisites
+  if ! apt_install_retry python3-venv python3-pip git; then
+    apt-get install -y python3-venv python3-pip git || true
   fi
-  # Verify install and start service if present
-  if python3 -c "import jtop; print(jtop.__version__)" >/dev/null 2>&1; then
-    systemctl daemon-reload || true
-    systemctl restart jtop.service || true
-  else
-    echo "ERROR: jtop (jetson-stats) failed to install" >&2
+
+  # Clean any existing jtop setup
+  systemctl stop jtop 2>/dev/null || true
+  systemctl disable jtop 2>/dev/null || true
+  rm -f /usr/local/bin/jtop
+  rm -rf /etc/jtop /var/log/jtop
+  rm -rf ~/.local/lib/python*/site-packages/jtop* ~/.local/lib/python*/site-packages/jetson_stats* 2>/dev/null || true
+
+  # Ensure /opt/jtop exists (do not wipe existing to allow updates)
+  install -d -m 0755 /opt/jtop
+  chown root:root /opt/jtop || true
+
+  # Create venv and upgrade pip stack
+  if [ ! -x /opt/jtop/venv/bin/pip ]; then
+    python3 -m venv /opt/jtop/venv || true
+  fi
+  /opt/jtop/venv/bin/pip install --upgrade pip setuptools wheel || true
+
+  # Clone jetson_stats and merge PR #698
+  if [ ! -d /opt/jtop/jetson_stats/.git ]; then
+    git clone https://github.com/rbonghi/jetson_stats.git /opt/jtop/jetson_stats || true
+  fi
+  if [ -d /opt/jtop/jetson_stats/.git ]; then
+    (
+      set -e
+      cd /opt/jtop/jetson_stats
+      git fetch origin || true
+      git checkout master || true
+      git reset --hard origin/master || true
+      git config user.name "jtop-setup" || true
+      git config user.email "root@localhost" || true
+      git fetch origin pull/698/head:pr-698 || true
+      if ! git merge --no-edit -X theirs pr-698; then
+        echo "WARNING: jtop PR #698 merge failed; proceeding without it" >&2
+      fi
+    ) || true
+  fi
+
+  # Install NVML deps and jtop from the repo into the venv
+  /opt/jtop/venv/bin/pip install --upgrade nvidia-ml-py nvidia-ml-py3 || true
+  if [ -d /opt/jtop/jetson_stats ]; then
+    /opt/jtop/venv/bin/pip install -e /opt/jtop/jetson_stats || true
+  fi
+
+  # Wrapper in PATH
+  cat >/usr/local/bin/jtop <<'EOF'
+#!/usr/bin/env bash
+exec /opt/jtop/venv/bin/jtop "$@"
+EOF
+  chmod +x /usr/local/bin/jtop
+
+  # Systemd service for jtop daemon
+  cat >/etc/systemd/system/jtop.service <<'EOF'
+[Unit]
+Description=Jetson Stats (jtop) - Thor + NVML
+After=network.target multi-user.target
+
+[Service]
+Type=simple
+Environment=JTOP_SERVICE=True
+ExecStart=/opt/jtop/venv/bin/jtop --force
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/opt/jtop/jetson_stats
+UMask=007
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload || true
+  systemctl enable --now jtop.service || true
+
+  # Quick NVML verification using the venv's python
+  /opt/jtop/venv/bin/python - <<'PY' || true
+import sys
+try:
+    import pynvml as n
+    n.nvmlInit()
+    print("NVML OK - Driver:", n.nvmlSystemGetDriverVersion())
+    cnt = n.nvmlDeviceGetCount()
+    print("NVML GPUs:", cnt)
+    for i in range(cnt):
+        h = n.nvmlDeviceGetHandleByIndex(i)
+        print(f" - GPU{i}:", n.nvmlDeviceGetName(h))
+except Exception as e:
+    print("NVML KO:", e, file=sys.stderr)
+    sys.exit(1)
+PY
+
+  if ! systemctl is-active --quiet jtop 2>/dev/null; then
+    journalctl -u jtop -n 80 --no-pager 2>/dev/null || true
+  fi
+
+else
+  # L4T 36.x and earlier: install via system pip (prefer no --break-system-packages)
+  if ! python3 -c "import jtop" >/dev/null 2>&1; then
+    apt-get install -y python3-pip || true
+    if ! python3 -m pip install -U jetson-stats >/dev/null 2>&1; then
+      if python3 -m pip help install 2>/dev/null | grep -q -- "--break-system-packages"; then
+        python3 -m pip install -U jetson-stats --break-system-packages || true
+      else
+        echo "WARNING: pip install failed and --break-system-packages not supported by this pip." >&2
+        echo "         Consider upgrading pip or using a virtualenv if install keeps failing." >&2
+      fi
+    fi
+    if python3 -c "import jtop; print(jtop.__version__)" >/dev/null 2>&1; then
+      systemctl daemon-reload || true
+      systemctl restart jtop.service || true
+    else
+      echo "ERROR: jtop (jetson-stats) failed to install" >&2
+    fi
   fi
 fi
 
@@ -1366,7 +1479,11 @@ EOF
   if [ -n "$NODE_IP" ]; then
     K3S_INSTALL_ARGS="$K3S_INSTALL_ARGS --node-ip $NODE_IP --advertise-address $NODE_IP"
   fi
-  sh -c "curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"$K3S_INSTALL_ARGS\" sh -s -" || true
+  if ! command -v k3s >/dev/null 2>&1; then
+    sh -c "curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"$K3S_INSTALL_ARGS\" sh -s -" || true
+  else
+    log " - K3s already installed; skipping install script"
+  fi
 
   # Ensure k3s waits for network-online and Docker at boot
   install -d -m 0755 /etc/systemd/system/k3s.service.d
@@ -1545,8 +1662,10 @@ fi
 nvm install --lts
 nvm alias default "lts/*" || true
 nvm use --lts
-# Install/refresh Codex CLI
-npm i -g @openai/codex
+# Install Codex CLI only if missing
+if ! npm list -g @openai/codex >/dev/null 2>&1; then
+  npm i -g @openai/codex
+fi
 # Show versions for verification
 node -v || true
 npm -v || true
