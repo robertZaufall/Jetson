@@ -1082,7 +1082,7 @@ else
   fi
 fi
 
-# Patch jetson-stats to map L4T 36.4.4 -> JetPack 6.2.1
+# Patch jetson-stats mappings (supports both system and Thor venv installs)
 JTOP_VARS_FILE=$(python3 - <<'PY'
 import os
 try:
@@ -1092,9 +1092,31 @@ except Exception:
     pass
 PY
 )
-if [ -z "$JTOP_VARS_FILE" ]; then
-  JTOP_VARS_FILE="/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py"
+# If not found via system python, try Thor venv python
+if [ -z "$JTOP_VARS_FILE" ] && [ -x /opt/jtop/venv/bin/python ]; then
+  JTOP_VARS_FILE=$(/opt/jtop/venv/bin/python - <<'PY'
+import os
+try:
+    import jtop.core.jetson_variables as v
+    print(os.path.abspath(v.__file__))
+except Exception:
+    pass
+PY
+  )
 fi
+# Fallback to common filesystem locations
+if [ -z "$JTOP_VARS_FILE" ]; then
+  for p in \
+    /opt/jtop/venv/lib/python*/site-packages/jtop/core/jetson_variables.py \
+    /usr/local/lib/python*/dist-packages/jtop/core/jetson_variables.py \
+    /usr/lib/python*/dist-packages/jtop/core/jetson_variables.py; do
+    for f in $p; do
+      [ -f "$f" ] && { JTOP_VARS_FILE="$f"; break; }
+    done
+    [ -n "$JTOP_VARS_FILE" ] && break
+  done
+fi
+
 if [ -f "$JTOP_VARS_FILE" ]; then
   if ! grep -q '"36.4.4": "6.2.1",' "$JTOP_VARS_FILE"; then
     sed -i -E '0,/"36\.4\.3": "6\.2",/s//"36.4.4": "6.2.1",\n    "36.4.3": "6.2",/' "$JTOP_VARS_FILE" || true
