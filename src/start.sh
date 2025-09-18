@@ -1102,6 +1102,9 @@ if [ -f "$JTOP_VARS_FILE" ]; then
   if ! grep -q '"38.2.0": "7.0",' "$JTOP_VARS_FILE"; then
     sed -i -E '0,/"36\.4\.4": "6\.2\.1",/s//"38.2.0": "7.0",\n    "36.4.4": "6.2.1",/' "$JTOP_VARS_FILE" || true
   fi
+  if ! grep -q '"38.2.1": "7.0 Rev.1",' "$JTOP_VARS_FILE"; then
+    sed -i -E '0,/"38\.2\.0": "7\.0",/s//"38.2.1": "7.0 Rev.1",\n    "38.2.0": "7.0",/' "$JTOP_VARS_FILE" || true
+  fi
 fi
 systemctl restart jtop.service || true
 
