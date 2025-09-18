@@ -1021,10 +1021,21 @@ StandardOutput=journal
 StandardError=journal
 WorkingDirectory=/opt/jtop/jetson_stats
 UMask=007
+Group=jtop
+RuntimeDirectory=jtop
+RuntimeDirectoryMode=0770
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  # Allow non-root users in 'jtop' group to access the daemon socket/files
+  if ! getent group jtop >/dev/null; then
+    groupadd --system jtop || true
+  fi
+  if ! id -nG "$USERNAME" | tr ' ' '\n' | grep -qx jtop; then
+    usermod -aG jtop "$USERNAME" || true
+  fi
 
   systemctl daemon-reload || true
   systemctl enable --now jtop.service || true
