@@ -221,7 +221,7 @@ if systemctl is-active --quiet NetworkManager 2>/dev/null || systemctl is-enable
   systemctl restart NetworkManager || true
 fi
 
-log "1) Enable GDM auto-login for user: $USERNAME"
+log "9) Enable GDM auto-login for user: $USERNAME"
 GDM_CONF="/etc/gdm3/custom.conf"
 install -d -m 0755 /etc/gdm3
 touch "$GDM_CONF"
@@ -241,7 +241,7 @@ BEGIN{in_d=0; se=0; su=0}
 END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user } }
 ' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
 
-log "2) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
+log "10) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
 mkdir -p "$KEYRINGS_DIR"
 

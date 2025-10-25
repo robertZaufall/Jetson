@@ -11,7 +11,7 @@ fi
 REBOOT=${REBOOT:-0}
 
 usage() {
-  echo "Usage: $0 [--reboot|--no-reboot] [[--vnc-password=PASS]"
+  echo "Usage: $0 [--reboot|--no-reboot] [--vnc-password=PASS]"
 }
 
 for arg in "$@"; do
@@ -118,7 +118,10 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
     log " - WARNING: could not locate a valid desktop session entry; leaving AccountsService untouched"
   fi
 
-  apt_install_retry x11vnc || true
+  if ! apt_install_retry x11vnc; then
+    echo "ERROR: failed to install x11vnc (check network/apt mirrors)." >&2
+    exit 1
+  fi
 
   VNC_PASS8=$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)
   if [ -z "$VNC_PASS8" ]; then
@@ -126,6 +129,7 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
     exit 1
   fi
 
+  install -d -m 0700 "$HOME_DIR/.config" 2>/dev/null || true
   x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
   printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
   chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
@@ -268,4 +272,14 @@ EOF
   fi
 else
   log " - Skipping VNC setup (provide --vnc-password=... to enable x11vnc)"
+fi
+
+if [ "$REBOOT" -eq 1 ]; then
+  log "Final: rebooting now to apply display/login changes…"
+  sleep 2
+  systemctl reboot
+else
+  log "Final: reboot NOT requested."
+  echo "Display manager changes take effect after restarting the graphical session; reboot when convenient."
+  echo "Reboot later with: sudo systemctl reboot"
 fi
