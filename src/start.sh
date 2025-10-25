@@ -481,7 +481,7 @@ unencrypted on disk. Change this policy if you need encryption.
 EOF
 
 
-if true; then
+if [ -n "${VNC_PASSWORD:-}" ]; then
   log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
   USER_UID=$(id -u "$USERNAME")
   USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
