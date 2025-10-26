@@ -10,9 +10,11 @@ fi
 
 REBOOT=${REBOOT:-0}
 REG_IP=${REG_IP:-${REG:-}}
+GIT_USER=${GIT_USER:-}
+GIT_EMAIL=${GIT_EMAIL:-}
 
 usage() {
-  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP]"
+  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP] [--git-user=NAME --git-email=EMAIL]"
 }
 
 for arg in "$@"; do
@@ -22,6 +24,8 @@ for arg in "$@"; do
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --mks) MICROK8S=1 ;;
     --k3s) K3S=1 ;;
+    --git-user=*) GIT_USER="${arg#*=}" ;;
+    --git-email=*) GIT_EMAIL="${arg#*=}" ;;
     REG=*) REG_IP="${arg#*=}" ;;
     --reg=*) REG_IP="${arg#*=}" ;;
     --help|-h) usage; exit 0 ;;
@@ -38,7 +42,7 @@ if [ -r /etc/os-release ]; then
 else
   TARGET_OS="$(uname -sr)"
 fi
-log "Target OS: ${TARGET_OS}; VNC backend: ${VNC_BACKEND}"
+log "Target OS: ${TARGET_OS}"
 
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
@@ -81,6 +85,7 @@ else
   log " - Hostname unchanged (no --hostname provided)"
 fi
 
+
 log "2) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
 # Ensure user's global LFS hooks/config are installed (per-user), independent of repo
 if command -v git >/dev/null 2>&1; then
@@ -108,7 +113,23 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 
-log "3) Configure Docker default runtime to NVIDIA"
+log "3) Configure Git identity (optional)"
+if [ -n "${GIT_USER:-}" ] || [ -n "${GIT_EMAIL:-}" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    log " - git not installed; skipping identity configuration"
+  elif [ -z "${GIT_USER:-}" ] || [ -z "${GIT_EMAIL:-}" ]; then
+    log " - WARNING: both --git-user and --git-email must be provided; skipping."
+  else
+    log " - Setting git user.name to '$GIT_USER' and user.email to '$GIT_EMAIL'"
+    sudo -u "$USERNAME" git config --global user.name "$GIT_USER"
+    sudo -u "$USERNAME" git config --global user.email "$GIT_EMAIL"
+  fi
+else
+  log " - Skipping Git identity configuration (provide --git-user and --git-email)"
+fi
+
+
+log "4) Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update -y && apt-get install -y python3 || true
@@ -144,7 +165,7 @@ systemctl daemon-reload || true
 systemctl restart docker || true
 log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
 
-log "4) Ensure $USERNAME is in 'docker' group"
+log "5) Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
   groupadd docker || true
 fi
@@ -156,7 +177,7 @@ else
 fi
 
 
-log "5) Install MicroK8s (snap) [optional]"
+log "6) Install MicroK8s (snap) [optional]"
 if [ "${MICROK8S}" -eq 1 ]; then
   if command -v snap >/dev/null 2>&1; then
     if snap list microk8s >/dev/null 2>&1; then
@@ -200,7 +221,7 @@ else
 fi
 
 
-log "6) Install K3s [optional]"
+log "7) Install K3s [optional]"
 if [ "${K3S}" -eq 1 ]; then
   # Disable IPv6 at runtime (as requested)
   sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
@@ -286,7 +307,7 @@ fi
 
 
 if [ "${K3S}" -eq 1 ]; then
-  log "7) Install Helm (Kubernetes package manager)"
+  log "8) Install Helm (Kubernetes package manager)"
   if command -v helm >/dev/null 2>&1; then
     log " - Helm already installed; skipping."
   else
@@ -301,7 +322,7 @@ if [ "${K3S}" -eq 1 ]; then
 fi
 
 
-log "8) Configure local registry (optional)"
+log "9) Configure local registry (optional)"
 if [ -n "${REG_IP:-}" ]; then
   # Basic IPv4 sanity check (do not hard fail if mismatched)
   if echo "$REG_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
@@ -383,7 +404,7 @@ else
 fi
 
 
-log "9) Install NVM + Node LTS + OpenAI Codex CLI"
+log "10) Install NVM + Node LTS + OpenAI Codex CLI"
 sudo -u "$USERNAME" bash -lc '
 set -e
 export NVM_DIR="$HOME/.nvm"
@@ -404,6 +425,14 @@ fi
 node -v || true
 npm -v || true
 '
+
+log "11) Install btop (system monitor)"
+if command -v btop >/dev/null 2>&1; then
+  log " - btop already installed; skipping."
+else
+  apt-get update -y
+  apt-get install -y btop
+fi
 
 
 if [ "$REBOOT" -eq 1 ]; then

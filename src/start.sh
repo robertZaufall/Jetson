@@ -10,6 +10,13 @@ fi
 
 REBOOT=${REBOOT:-0}
 REG_IP=${REG_IP:-${REG:-}}
+GIT_USER=${GIT_USER:-}
+GIT_EMAIL=${GIT_EMAIL:-}
+
+usage() {
+  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --reboot|-r) REBOOT=1 ;;
@@ -21,9 +28,11 @@ for arg in "$@"; do
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
     --mks) MICROK8S=1 ;;
     --k3s) K3S=1 ;;
+    --git-user=*) GIT_USER="${arg#*=}" ;;
+    --git-email=*) GIT_EMAIL="${arg#*=}" ;;
     REG=*) REG_IP="${arg#*=}" ;;
     --reg=*) REG_IP="${arg#*=}" ;;
-    --help|-h) echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...] [REG=REGISTRY_IP|--reg=REGISTRY_IP]" ; exit 0 ;;
+    --help|-h) usage; exit 0 ;;
   esac
 done
 
@@ -1706,6 +1715,30 @@ fi
 node -v || true
 npm -v || true
 '
+
+log "33) Configure Git identity (optional)"
+if [ -n "${GIT_USER:-}" ] || [ -n "${GIT_EMAIL:-}" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    log " - git not installed; skipping identity configuration"
+  elif [ -z "${GIT_USER:-}" ] || [ -z "${GIT_EMAIL:-}" ]; then
+    log " - WARNING: both --git-user and --git-email must be provided; skipping."
+  else
+    log " - Setting git user.name to '$GIT_USER' and user.email to '$GIT_EMAIL'"
+    sudo -u "$USERNAME" git config --global user.name "$GIT_USER"
+    sudo -u "$USERNAME" git config --global user.email "$GIT_EMAIL"
+  fi
+else
+  log " - Skipping Git identity configuration (provide --git-user and --git-email)"
+fi
+
+
+log "34) Install btop (system monitor)"
+if command -v btop >/dev/null 2>&1; then
+  log " - btop already installed; skipping."
+else
+  apt-get update -y
+  apt-get install -y btop
+fi
 
 
 if [ "$REBOOT" -eq 1 ]; then
