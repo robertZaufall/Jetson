@@ -21,6 +21,28 @@ nm_ready() {
   command -v nmcli >/dev/null 2>&1 && nmcli general status >/dev/null 2>&1
 }
 
+ensure_nccl_socket_setting() {
+  local bashrc_path="${HOME}/.bashrc"
+  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
+
+  if [[ ! -f "$bashrc_path" ]]; then
+    touch "$bashrc_path"
+    chmod 644 "$bashrc_path"
+  fi
+
+  if grep -Fqx "$export_line" "$bashrc_path"; then
+    echo "NCCL_SOCKET_IFNAME already exported in $bashrc_path."
+  else
+    echo "$export_line" >>"$bashrc_path"
+    echo "Added NCCL socket interface export to $bashrc_path."
+  fi
+
+  set +u
+  # shellcheck disable=SC1090
+  source "$bashrc_path"
+  set -u
+}
+
 ensure_device_exists() {
   local ifname=$1
   if ip link show "$ifname" >/dev/null 2>&1; then
@@ -159,6 +181,8 @@ main() {
     echo "This script must be run as root. Try: sudo $0 <node_number>"
     exit 1
   fi
+
+  ensure_nccl_socket_setting
 
   local force_nm=0
   local force_netplan=0
