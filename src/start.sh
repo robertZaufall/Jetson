@@ -135,6 +135,8 @@ L4T_VERSION=$(detect_l4t)
 UBUNTU_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-unknown}}
 log "Platform: L4T ${L4T_VERSION:-unknown} on Ubuntu ${UBUNTU_CODENAME}"
 
+######################################################################################
+
 # 0) Configure German keyboard layout (system-wide + GNOME + GDM)
 log "0) Set German keyboard layout (system + GNOME + GDM)"
 # Console + X11 defaults
@@ -170,6 +172,8 @@ xkb-options=['terminate:ctrl_alt_bksp']
 EOF
 dconf update 2>/dev/null || true
 
+######################################################################################
+
 log "1) Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
 # Use resilient installer to tolerate transient DNS/network issues across L4T 36.4.4/38.2
@@ -186,11 +190,15 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   fi
 fi
 
+######################################################################################
+
 # 1) Install NVIDIA JetPack SDK meta-package
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
 if ! apt_install_retry nvidia-jetpack; then
   log " - WARNING: could not install nvidia-jetpack now (repo/DNS?). Skipping."
 fi
+
+######################################################################################
 
 log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
 # Ensure the dconf user profile reads system 'local' DB (required for defaults to apply)
@@ -238,6 +246,8 @@ cat >/etc/dconf/db/local.d/locks/00-nosleep-locks <<'EOF'
 EOF
 dconf update || true
 
+######################################################################################
+
 log "3) GDM greeter: prevent idle/suspend"
 install -d -m 0755 /etc/dconf/profile
 cat >/etc/dconf/profile/gdm <<'EOF'
@@ -266,6 +276,8 @@ ubuntu-lock-on-suspend=false
 EOF
 dconf update || true
 
+######################################################################################
+
 log "4) X11 PERMANENT: disable DPMS & blanking at the Xorg level"
 install -d -m 0755 /etc/X11/xorg.conf.d
 cat >/etc/X11/xorg.conf.d/10-extensions.conf <<'EOF'
@@ -281,6 +293,8 @@ Section "ServerFlags"
     Option "OffTime" "0"
 EndSection
 EOF
+
+######################################################################################
 
 log "5) X11 PERMANENT: user-session fallback to enforce no-blank via xset"
 cat >/usr/local/bin/disable-dpms-x11 <<'EOF'
@@ -358,8 +372,12 @@ OnlyShowIn=GNOME;
 X-GNOME-Autostart-enabled=true
 EOF
 
+######################################################################################
+
 log "6) Block suspend/hibernate at systemd level"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target || true
+
+######################################################################################
 
 log "7) systemd-logind: ignore lid/suspend keys"
 conf=/etc/systemd/logind.conf
@@ -373,6 +391,8 @@ sed -i \
   "$conf" || true
 grep -q '^IdleAction=ignore' "$conf" || echo 'IdleAction=ignore' >>"$conf"
 systemctl restart systemd-logind || true
+
+######################################################################################
 
 log "8) Disable TTY (virtual console) blanking"
 cat >/etc/systemd/system/disable-console-blanking.service <<'EOF'
@@ -390,6 +410,8 @@ EOF
 systemctl daemon-reload
 systemctl enable --now disable-console-blanking.service || true
 
+######################################################################################
+
 log "9) Disable Wi-Fi powersave (NetworkManager)"
 install -d -m 0755 /etc/NetworkManager/conf.d
 cat >/etc/NetworkManager/conf.d/00-wifi-powersave-off.conf <<'EOF'
@@ -399,6 +421,8 @@ EOF
 if systemctl is-active --quiet NetworkManager 2>/dev/null || systemctl is-enabled --quiet NetworkManager 2>/dev/null; then
   systemctl restart NetworkManager || true
 fi
+
+######################################################################################
 
 log "10) Optional: key-only SSH (if SSH_KEY_PATH provided)"
 if [ "${SSH_KEY_PATH:-}" != "" ] && [ -f "${SSH_KEY_PATH}" ]; then
@@ -419,6 +443,8 @@ EOF
   systemctl reload ssh || true
 fi
 
+######################################################################################
+
 log "11) Enable GDM auto-login for user: $USERNAME"
 GDM_CONF="/etc/gdm3/custom.conf"
 install -d -m 0755 /etc/gdm3
@@ -438,6 +464,8 @@ BEGIN{in_d=0; se=0; su=0}
 }
 END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "AutomaticLogin=" user } }
 ' "$GDM_CONF" > "$GDM_CONF.tmp" && mv "$GDM_CONF.tmp" "$GDM_CONF"
+
+######################################################################################
 
 log "12) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
@@ -489,6 +517,7 @@ so GNOME will not prompt to set a keyring password. Secrets stored via libsecret
 unencrypted on disk. Change this policy if you need encryption.
 EOF
 
+######################################################################################
 
 if [ -n "${VNC_PASSWORD:-}" ]; then
   log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
@@ -916,6 +945,8 @@ else
   log "13) VNC: no changes (run with --vnc-password=... to modify VNC settings)"
 fi
 
+######################################################################################
+
 log "14) Rename device (hostname) if requested"
 if [ -n "${NEW_HOSTNAME:-}" ]; then
   # Validate hostname (RFC 1123 label rules: letters/digits/hyphen; max 63 per label)
@@ -943,6 +974,8 @@ if [ -n "${NEW_HOSTNAME:-}" ]; then
   log " - Hostname set. New /etc/hosts entry: $(grep -E '^127\.0\.1\.1\b' /etc/hosts || true)"
 fi
 
+######################################################################################
+
 log "15) Disable zram (nvzramconfig)"
 if systemctl is-enabled nvzramconfig >/dev/null 2>&1; then
   systemctl disable nvzramconfig || true
@@ -952,6 +985,7 @@ else
   log " - zram already disabled; skipping."
 fi
 
+######################################################################################
 
 log "16) Install jetson-stats (jtop) and patch version mapping"
 # Thor (L4T 38.x): install jtop in a dedicated venv under /opt/jtop without --break-system-packages
@@ -1139,6 +1173,8 @@ if [ -f "$JTOP_VARS_FILE" ]; then
 fi
 systemctl restart jtop.service || true
 
+######################################################################################
+
 log "17) Ensure swapfile size is $SWAP_SIZE (auto-default 8G/16G)"
 to_bytes() {
   local s="$1"
@@ -1181,6 +1217,8 @@ else
   fi
 fi
 
+######################################################################################
+
 log "18) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
 # Ensure user's global LFS hooks/config are installed (per-user), independent of repo
 if command -v git >/dev/null 2>&1; then
@@ -1206,6 +1244,8 @@ if command -v git >/dev/null 2>&1; then
     fi
   done < <(find "$HOME_DIR" -type d -name .git -prune -print0 2>/dev/null)
 fi
+
+######################################################################################
 
 log "19) Set Jetson power mode (Thor=1/120W, others=MAXN)"
 if command -v nvpmodel >/dev/null 2>&1; then
@@ -1259,6 +1299,8 @@ else
   log " - nvpmodel not found; skipping."
 fi
 
+######################################################################################
+
 log "20) Install Docker Engine and plugins (if missing)"
 if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y ca-certificates curl gnupg
@@ -1276,6 +1318,8 @@ else
   log " - Docker already installed; ensuring plugins present"
   apt-get install -y docker-buildx-plugin docker-compose-plugin || true
 fi
+
+######################################################################################
 
 log "21) Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
@@ -1313,6 +1357,8 @@ systemctl daemon-reload || true
 systemctl restart docker || true
 log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
 
+######################################################################################
+
 log "22) Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
   groupadd docker || true
@@ -1324,22 +1370,25 @@ else
   log " - Added $USERNAME to docker group. You may need to log out/in for group changes to take effect."
 fi
 
+######################################################################################
 
 log "23) Force snapd 2.68.5 (rev 24724) and hold (conditional)"
 # Parse L4T version from /etc/nv_tegra_release as MAJOR.MINOR.PATCH (e.g., 36.4.4 or 38.2.0)
-L4T_VER="$(awk 'BEGIN{maj="";rev=""} /^# R[0-9]/{maj=$2;gsub(/[^0-9]/,"",maj); if(match($0,/REVISION:[[:space:]]*([0-9]+(\.[0-9]+)*)/,m)){rev=m[1]} print maj"."rev; exit }' /etc/nv_tegra_release 2>/dev/null || true)"
-if printf '%s' "$L4T_VER" | grep -qE '^38\.'; then
-  log " - Detected L4T $L4T_VER (38.x): skipping snapd pin/hold"
-elif [ "$L4T_VER" = "36.4.4" ]; then
-  log " - Detected L4T 36.4.4: forcing snapd 2.68.5 and holding"
-  snap download snapd --revision=24724 || true
-  snap ack snapd_24724.assert 2>/dev/null || true
-  snap install snapd_24724.snap || true
-  snap refresh --hold snapd || true
-  rm -f snapd_24724.assert snapd_24724.snap || true
-else
-  log " - L4T version '${L4T_VER:-unknown}' not explicitly handled; not pinning snapd"
-fi
+# L4T_VER="$(awk 'BEGIN{maj="";rev=""} /^# R[0-9]/{maj=$2;gsub(/[^0-9]/,"",maj); if(match($0,/REVISION:[[:space:]]*([0-9]+(\.[0-9]+)*)/,m)){rev=m[1]} print maj"."rev; exit }' /etc/nv_tegra_release 2>/dev/null || true)"
+# if printf '%s' "$L4T_VER" | grep -qE '^38\.'; then
+#   log " - Detected L4T $L4T_VER (38.x): skipping snapd pin/hold"
+# elif [ "$L4T_VER" = "36.4.4" ]; then
+#   log " - Detected L4T 36.4.4: forcing snapd 2.68.5 and holding"
+#   snap download snapd --revision=24724 || true
+#   snap ack snapd_24724.assert 2>/dev/null || true
+#   snap install snapd_24724.snap || true
+#   snap refresh --hold snapd || true
+#   rm -f snapd_24724.assert snapd_24724.snap || true
+# else
+#   log " - L4T version '${L4T_VER:-unknown}' not explicitly handled; not pinning snapd"
+# fi
+
+######################################################################################
 
 log "24) Remove preinstalled games (apt & snap)"
 
@@ -1401,6 +1450,7 @@ else
   log " - snap not installed; skipping snap game removal"
 fi
 
+######################################################################################
 
 log "25) Install MicroK8s (snap) [optional]"
 if [ "${MICROK8S}" -eq 1 ]; then
@@ -1445,6 +1495,8 @@ else
   log " - Skipping MicroK8s install (use --mks to enable)"
 fi
 
+######################################################################################
+
 # --- Step 26: Clone jetson-containers and run install.sh (only if missing) ---
 log "26) Clone jetson-containers and run install.sh (only if missing)"
 # Ensure git is available
@@ -1466,6 +1518,8 @@ else
     log " - WARNING: install.sh not found or not executable at $TARGET_DIR after clone"
   fi
 fi
+
+######################################################################################
 
 # --- Step 27: Install K3s [optional] ---
 log "27) Install K3s [optional]"
@@ -1552,6 +1606,8 @@ else
   log " - Skipping K3s install (use --k3s to enable)"
 fi
 
+######################################################################################
+
 # --- Step 28: Install Helm (Kubernetes package manager) [optional, only if K3s is installed] ---
 if [ "${K3S}" -eq 1 ]; then
   log "28) Install Helm (Kubernetes package manager)"
@@ -1572,6 +1628,7 @@ fi
 log "29) Install guvcview"
 apt-get install -y guvcview
 
+######################################################################################
 
 # --- Step 30: Clean some system components ---
 # log "30) Clean some system components"
@@ -1611,6 +1668,7 @@ apt-get install -y guvcview
 # systemctl mask packagekit.service 2>/dev/null || true
 # systemctl mask fwupd.service 2>/dev/null || true
 
+######################################################################################
 
 # --- Step 31: Configure local registry (optional via REG IP) ---
 log "31) Configure local registry (optional)"
@@ -1694,6 +1752,8 @@ else
   log " - Skipping registry setup (provide REG=IP or --reg=IP)"
 fi
 
+######################################################################################
+
 log "32) Install NVM + Node LTS + OpenAI Codex CLI"
 sudo -u "$USERNAME" bash -lc '
 set -e
@@ -1716,6 +1776,8 @@ node -v || true
 npm -v || true
 '
 
+######################################################################################
+
 log "33) Configure Git identity (optional)"
 if [ -n "${GIT_USER:-}" ] || [ -n "${GIT_EMAIL:-}" ]; then
   if ! command -v git >/dev/null 2>&1; then
@@ -1731,6 +1793,7 @@ else
   log " - Skipping Git identity configuration (provide --git-user and --git-email)"
 fi
 
+######################################################################################
 
 log "34) Install btop (system monitor)"
 if command -v btop >/dev/null 2>&1; then
@@ -1740,6 +1803,7 @@ else
   apt-get install -y btop
 fi
 
+######################################################################################
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply Xorg changes…"
