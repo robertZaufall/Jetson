@@ -4,15 +4,17 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: set_node.sh [--force-nm|--force-netplan] <node_number>
+Usage: set_node.sh [--force-nm|--force-netplan] [--cleanup] <node_number>
 
   node_number: 1 or 2 (defines the static CX7 addressing)
+  --cleanup: remove NetworkManager connections, Netplan file, and NCCL env change
 
 Behavior:
   - If NetworkManager is running (default Jetson desktop install), the CX7
     interfaces are configured via nmcli so Wi-Fi and other connections stay up.
   - If NetworkManager is unavailable or --force-netplan is passed, a Netplan
     file (/etc/netplan/40-cx7-p2p.yaml) is written and applied.
+  - --cleanup removes the changes made by this script. No node_number required.
 EOF
   exit 1
 }
@@ -41,6 +43,25 @@ ensure_nccl_socket_setting() {
   # shellcheck disable=SC1090
   source "$bashrc_path"
   set -u
+}
+
+cleanup_nccl_socket_setting() {
+  local bashrc_path="${HOME}/.bashrc"
+  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
+
+  if [[ ! -f "$bashrc_path" ]]; then
+    return 0
+  fi
+
+  if ! grep -Fq "$export_line" "$bashrc_path"; then
+    return 0
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  grep -Fvx "$export_line" "$bashrc_path" >"$tmp"
+  mv "$tmp" "$bashrc_path"
+  echo "Removed NCCL socket export from $bashrc_path."
 }
 
 ensure_device_exists() {
@@ -176,22 +197,78 @@ apply_netplan() {
   fi
 }
 
+cleanup_netplan() {
+  local config_path="/etc/netplan/40-cx7-p2p.yaml"
+
+  if [[ ! -f "$config_path" ]]; then
+    echo "No Netplan file to remove at $config_path."
+    return 0
+  fi
+
+  rm -f "$config_path"
+  echo "Removed $config_path."
+  if command -v netplan >/dev/null 2>&1; then
+    if netplan apply; then
+      echo "Re-applied Netplan after removal."
+    else
+      echo "WARNING: netplan apply failed after cleanup." >&2
+    fi
+  fi
+}
+
+cleanup_nm() {
+  if ! nm_ready; then
+    echo "NetworkManager unavailable; skipping nmcli cleanup."
+    return 0
+  fi
+
+  local connections=(
+    "cx7-node1-enp1s0f0np0"
+    "cx7-node1-enP2p1s0f0np0"
+    "cx7-node2-enp1s0f0np0"
+    "cx7-node2-enP2p1s0f0np0"
+  )
+
+  local ifaces=("enp1s0f0np0" "enP2p1s0f0np0")
+
+  for conn in "${connections[@]}"; do
+    if nmcli -t -f NAME connection show "$conn" >/dev/null 2>&1; then
+      nmcli connection down "$conn" >/dev/null 2>&1 || true
+      nmcli connection delete "$conn" >/dev/null
+      echo "Deleted NetworkManager connection '$conn'."
+    fi
+  done
+
+  for iface in "${ifaces[@]}"; do
+    if ensure_device_exists "$iface"; then
+      ip addr flush dev "$iface" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+cleanup_all() {
+  cleanup_nccl_socket_setting
+  cleanup_nm
+  cleanup_netplan
+  echo "Cleanup complete."
+}
+
 main() {
   if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root. Try: sudo $0 <node_number>"
     exit 1
   fi
 
-  ensure_nccl_socket_setting
-
   local force_nm=0
   local force_netplan=0
   local node_number=""
+  local cleanup=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --force-nm) force_nm=1 ;;
       --force-netplan) force_netplan=1 ;;
+      --cleanup) cleanup=1 ;;
       -h|--help) usage ;;
       1|2)
         if [[ -n "$node_number" ]]; then
@@ -205,6 +282,13 @@ main() {
     esac
     shift
   done
+
+  if (( cleanup == 1 )); then
+    cleanup_all
+    exit 0
+  fi
+
+  ensure_nccl_socket_setting
 
   if [[ -z "$node_number" ]]; then
     usage
