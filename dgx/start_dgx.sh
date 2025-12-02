@@ -341,7 +341,7 @@ if [ -n "${REG_IP:-}" ]; then
 
     # 8.2) Install domain.crt for Docker registry.local on ports 5001/5002/5555
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    CERT_SRC="$SCRIPT_DIR/domain.crt"
+    CERT_SRC="$SCRIPT_DIR/../src/domain.crt"
     if [ -f "$CERT_SRC" ]; then
       for d in \
         /etc/docker/certs.d/registry.local:5001 \
