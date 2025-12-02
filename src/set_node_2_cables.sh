@@ -10,9 +10,6 @@ Usage: set_node.sh [--force-nm|--force-netplan] [--cleanup] <node_number>
   --cleanup: remove NetworkManager connections, Netplan file, and NCCL env change
 
 Behavior:
-  - Single-cable CX7 setup with manual static IPv4 addresses on both connectors,
-    ports 0 and 1 (enp1s0f0np0, enp1s0f1np1, enP2p1s0f0np0, enP2p1s0f1np1)
-    using the DGX Spark playbook IPs. No bonding used.
   - If NetworkManager is running (default Jetson desktop install), the CX7
     interfaces are configured via nmcli so Wi-Fi and other connections stay up.
   - If NetworkManager is unavailable or --force-netplan is passed, a Netplan
@@ -28,30 +25,12 @@ nm_ready() {
 
 ensure_nccl_socket_setting() {
   local bashrc_path="${HOME}/.bashrc"
-  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1,enP2p1s0f0np0,enP2p1s0f1np1'
-  local old_export_lines=(
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0,enP2p1s0f1np1'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1,enP2p1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
-  )
+  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
 
   if [[ ! -f "$bashrc_path" ]]; then
     touch "$bashrc_path"
     chmod 644 "$bashrc_path"
   fi
-
-  for legacy_line in "${old_export_lines[@]}"; do
-    if grep -Fqx "$legacy_line" "$bashrc_path"; then
-      local tmp_cleanup
-      tmp_cleanup=$(mktemp)
-      grep -Fvx "$legacy_line" "$bashrc_path" >"$tmp_cleanup"
-      mv "$tmp_cleanup" "$bashrc_path"
-      echo "Removed legacy NCCL socket export from $bashrc_path: $legacy_line"
-    fi
-  done
 
   if grep -Fqx "$export_line" "$bashrc_path"; then
     echo "NCCL_SOCKET_IFNAME already exported in $bashrc_path."
@@ -68,39 +47,19 @@ ensure_nccl_socket_setting() {
 
 cleanup_nccl_socket_setting() {
   local bashrc_path="${HOME}/.bashrc"
-  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1,enP2p1s0f0np0,enP2p1s0f1np1'
-  local old_export_lines=(
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0,enP2p1s0f1np1'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enp1s0f1np1,enP2p1s0f0np0'
-    'export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
-  )
+  local export_line='export NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0'
 
   if [[ ! -f "$bashrc_path" ]]; then
     return 0
   fi
 
-  local pattern_found=0
-  if grep -Fqx "$export_line" "$bashrc_path"; then
-    pattern_found=1
-  else
-    for legacy_line in "${old_export_lines[@]}"; do
-      if grep -Fqx "$legacy_line" "$bashrc_path"; then
-        pattern_found=1
-        break
-      fi
-    done
-  fi
-
-  if (( pattern_found == 0 )); then
+  if ! grep -Fq "$export_line" "$bashrc_path"; then
     return 0
   fi
 
   local tmp
   tmp=$(mktemp)
-  grep -Fvx -e "$export_line" -e "${old_export_lines[@]}" "$bashrc_path" >"$tmp"
+  grep -Fvx "$export_line" "$bashrc_path" >"$tmp"
   mv "$tmp" "$bashrc_path"
   echo "Removed NCCL socket export from $bashrc_path."
 }
@@ -148,33 +107,24 @@ configure_nm_connection() {
 
 configure_with_nm() {
   local node_number=$1
-  local addr_port0
-  local addr_port1
-  local addr_port2
-  local addr_port3
-  local mtu_port1=9000
-  local mtu_port3=9000
+  local addr_primary
+  local addr_secondary
+  local mtu_secondary=9000
 
   case "$node_number" in
     1)
-      addr_port0="192.168.100.10/24"
-      addr_port1="192.168.100.14/24"
-      addr_port2="192.168.200.12/24"
-      addr_port3="192.168.200.16/24"
+      addr_primary="192.168.100.1/24"
+      addr_secondary="192.168.200.1/24"
       ;;
     2)
-      addr_port0="192.168.100.11/24"
-      addr_port1="192.168.100.15/24"
-      addr_port2="192.168.200.13/24"
-      addr_port3="192.168.200.17/24"
+      addr_primary="192.168.100.2/24"
+      addr_secondary="192.168.200.2/24"
       ;;
   esac
 
-  configure_nm_connection "cx7-node${node_number}-enp1s0f0np0" "enp1s0f0np0" "$addr_port0"
-  configure_nm_connection "cx7-node${node_number}-enP2p1s0f0np0" "enP2p1s0f0np0" "$addr_port1"
-  configure_nm_connection "cx7-node${node_number}-enp1s0f1np1" "enp1s0f1np1" "$addr_port2" "$mtu_port1"
-  configure_nm_connection "cx7-node${node_number}-enP2p1s0f1np1" "enP2p1s0f1np1" "$addr_port3" "$mtu_port3"
-  echo "Static CX7 addresses applied via NetworkManager (both ports on both connectors)."
+  configure_nm_connection "cx7-node${node_number}-enp1s0f0np0" "enp1s0f0np0" "$addr_primary"
+  configure_nm_connection "cx7-node${node_number}-enP2p1s0f0np0" "enP2p1s0f0np0" "$addr_secondary" "$mtu_secondary"
+  echo "Static CX7 addresses applied via NetworkManager."
 }
 
 generate_yaml() {
@@ -186,24 +136,17 @@ generate_yaml() {
 network:
   version: 2
   ethernets:
+    # First Half (Standard)
     enp1s0f0np0:
       dhcp4: false
       addresses:
-        - 192.168.100.10/24
+        - 192.168.100.1/24
+    # Second Half (The enP2 ports you asked about)
     enP2p1s0f0np0:
       dhcp4: false
       addresses:
-        - 192.168.100.14/24
-    enp1s0f1np1:
-      dhcp4: false
-      addresses:
-        - 192.168.200.12/24
-      mtu: 9000
-    enP2p1s0f1np1:
-      dhcp4: false
-      addresses:
-        - 192.168.200.16/24
-      mtu: 9000
+        - 192.168.200.1/24
+      mtu: 9000  # Recommended for RoCE
 EOF
       ;;
     2)
@@ -211,23 +154,16 @@ EOF
 network:
   version: 2
   ethernets:
+    # First Half
     enp1s0f0np0:
       dhcp4: false
       addresses:
-        - 192.168.100.11/24
+        - 192.168.100.2/24
+    # Second Half
     enP2p1s0f0np0:
       dhcp4: false
       addresses:
-        - 192.168.100.15/24
-    enp1s0f1np1:
-      dhcp4: false
-      addresses:
-        - 192.168.200.13/24
-      mtu: 9000
-    enP2p1s0f1np1:
-      dhcp4: false
-      addresses:
-        - 192.168.200.17/24
+        - 192.168.200.2/24
       mtu: 9000
 EOF
       ;;
@@ -288,16 +224,12 @@ cleanup_nm() {
 
   local connections=(
     "cx7-node1-enp1s0f0np0"
-    "cx7-node1-enp1s0f1np1"
     "cx7-node1-enP2p1s0f0np0"
-    "cx7-node1-enP2p1s0f1np1"
     "cx7-node2-enp1s0f0np0"
-    "cx7-node2-enp1s0f1np1"
     "cx7-node2-enP2p1s0f0np0"
-    "cx7-node2-enP2p1s0f1np1"
   )
 
-  local ifaces=("enp1s0f0np0" "enp1s0f1np1" "enP2p1s0f0np0" "enP2p1s0f1np1")
+  local ifaces=("enp1s0f0np0" "enP2p1s0f0np0")
 
   for conn in "${connections[@]}"; do
     if nmcli -t -f NAME connection show "$conn" >/dev/null 2>&1; then
