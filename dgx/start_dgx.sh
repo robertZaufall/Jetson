@@ -57,6 +57,7 @@ USERNAME="$(resolve_user)"
 HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
 log "Target user: $USERNAME ($HOME_DIR)"
 
+######################################################################################
 
 log "1) Rename device (hostname) if requested"
 if [ -n "${NEW_HOSTNAME:-}" ]; then
@@ -85,6 +86,7 @@ else
   log " - Hostname unchanged (no --hostname provided)"
 fi
 
+######################################################################################
 
 log "2) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
 # Ensure user's global LFS hooks/config are installed (per-user), independent of repo
@@ -112,6 +114,7 @@ if command -v git >/dev/null 2>&1; then
   done < <(find "$HOME_DIR" -type d -name .git -prune -print0 2>/dev/null)
 fi
 
+######################################################################################
 
 log "3) Configure Git identity (optional)"
 if [ -n "${GIT_USER:-}" ] || [ -n "${GIT_EMAIL:-}" ]; then
@@ -128,6 +131,7 @@ else
   log " - Skipping Git identity configuration (provide --git-user and --git-email)"
 fi
 
+######################################################################################
 
 log "4) Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
@@ -165,6 +169,8 @@ systemctl daemon-reload || true
 systemctl restart docker || true
 log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
 
+######################################################################################
+
 log "5) Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
   groupadd docker || true
@@ -176,6 +182,7 @@ else
   log " - Added $USERNAME to docker group. You may need to log out/in for group changes to take effect."
 fi
 
+######################################################################################
 
 log "6) Install MicroK8s (snap) [optional]"
 if [ "${MICROK8S}" -eq 1 ]; then
@@ -220,6 +227,7 @@ else
   log " - Skipping MicroK8s install (use --mks to enable)"
 fi
 
+######################################################################################
 
 log "7) Install K3s [optional]"
 if [ "${K3S}" -eq 1 ]; then
@@ -305,6 +313,7 @@ else
   log " - Skipping K3s install (use --k3s to enable)"
 fi
 
+######################################################################################
 
 if [ "${K3S}" -eq 1 ]; then
   log "8) Install Helm (Kubernetes package manager)"
@@ -321,6 +330,7 @@ if [ "${K3S}" -eq 1 ]; then
   fi
 fi
 
+######################################################################################
 
 log "9) Configure local registry (optional)"
 if [ -n "${REG_IP:-}" ]; then
@@ -328,7 +338,7 @@ if [ -n "${REG_IP:-}" ]; then
   if echo "$REG_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
     log " - Using registry IP: $REG_IP"
 
-    # 8.1) Add/replace registry.local in /etc/hosts
+    # 1) Add/replace registry.local in /etc/hosts
     if [ -f /etc/hosts ]; then
       cp /etc/hosts "/etc/hosts.bak.$(date +%s)" || true
       awk 'index($0,"registry.local")==0' /etc/hosts > /etc/hosts.tmp && \
@@ -339,7 +349,7 @@ if [ -n "${REG_IP:-}" ]; then
     fi
     log " - Mapped registry.local to $REG_IP in /etc/hosts"
 
-    # 8.2) Install domain.crt for Docker registry.local on ports 5001/5002/5555
+    # 2) Install domain.crt for Docker registry.local on ports 5001/5002/5555
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     CERT_SRC="$SCRIPT_DIR/../src/domain.crt"
     if [ -f "$CERT_SRC" ]; then
@@ -360,7 +370,7 @@ if [ -n "${REG_IP:-}" ]; then
       log " - WARNING: domain.crt not found at $CERT_SRC; skipping cert installation"
     fi
 
-    # 8.3) Ensure Docker daemon.json has registry mirrors
+    # 3) Ensure Docker daemon.json has registry mirrors
     DAEMON_JSON=/etc/docker/daemon.json
     if ! command -v python3 >/dev/null 2>&1; then
       apt-get update -y && apt-get install -y python3 || true
@@ -403,6 +413,7 @@ else
   log " - Skipping registry setup (provide REG=IP or --reg=IP)"
 fi
 
+######################################################################################
 
 log "10) Install NVM + Node LTS + OpenAI Codex CLI"
 sudo -u "$USERNAME" bash -lc '
@@ -426,6 +437,8 @@ node -v || true
 npm -v || true
 '
 
+######################################################################################
+
 log "11) Install btop (system monitor)"
 if command -v btop >/dev/null 2>&1; then
   log " - btop already installed; skipping."
@@ -434,6 +447,26 @@ else
   apt-get install -y btop
 fi
 
+######################################################################################
+
+log "12) Set CPU governor to performance and disable deep idle (cpupower)"
+ensure_cpupower() {
+  if command -v cpupower >/dev/null 2>&1; then
+    return 0
+  fi
+  log " - cpupower not found; installing linux-tools for $(uname -r)"
+  apt-get update -y
+  apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || return 1
+}
+
+if ensure_cpupower; then
+  cpupower idle-set -D 0 || log " - WARNING: cpupower idle-set failed"
+  cpupower frequency-set -g performance || log " - WARNING: cpupower frequency-set failed"
+else
+  log " - WARNING: cpupower unavailable; skipped CPU tuning"
+fi
+
+######################################################################################
 
 if [ "$REBOOT" -eq 1 ]; then
   log "Final: rebooting now to apply display/login changes…"
