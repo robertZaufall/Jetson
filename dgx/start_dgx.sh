@@ -12,9 +12,12 @@ REBOOT=${REBOOT:-0}
 REG_IP=${REG_IP:-${REG:-}}
 GIT_USER=${GIT_USER:-}
 GIT_EMAIL=${GIT_EMAIL:-}
+WIFI_SSID=${WIFI_SSID:-}
+WIFI_PSK=${WIFI_PSK:-}
+WIFI_IF=${WIFI_IF:-}
 
 usage() {
-  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP] [--git-user=NAME --git-email=EMAIL]"
+  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP] [--git-user=NAME --git-email=EMAIL] [--wifi-ssid=SSID --wifi-psk=PASS [--wifi-if=IFACE]]"
 }
 
 for arg in "$@"; do
@@ -26,6 +29,9 @@ for arg in "$@"; do
     --k3s) K3S=1 ;;
     --git-user=*) GIT_USER="${arg#*=}" ;;
     --git-email=*) GIT_EMAIL="${arg#*=}" ;;
+    --wifi-ssid=*) WIFI_SSID="${arg#*=}" ;;
+    --wifi-psk=*) WIFI_PSK="${arg#*=}" ;;
+    --wifi-if=*) WIFI_IF="${arg#*=}" ;;
     REG=*) REG_IP="${arg#*=}" ;;
     --reg=*) REG_IP="${arg#*=}" ;;
     --help|-h) usage; exit 0 ;;
@@ -465,6 +471,232 @@ if ensure_cpupower; then
 else
   log " - WARNING: cpupower unavailable; skipped CPU tuning"
 fi
+
+######################################################################################
+
+log "13) Force default UNENCRYPTED GNOME keyring (empty password)"
+KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
+DEFAULT_POINTER_FILE="$KEYRINGS_DIR/default"
+DEFAULT_RING_FILE="$KEYRINGS_DIR/Default_keyring.keyring"
+
+mkdir -p "$KEYRINGS_DIR"
+
+# Backup any existing keyrings, then replace with plaintext default
+if ls -A "$KEYRINGS_DIR" >/dev/null 2>&1; then
+  TS=$(date +%Y%m%d-%H%M%S)
+  BACKUP_DIR="$HOME_DIR/.local/share/keyrings-backup-$TS"
+  cp -a "$KEYRINGS_DIR" "$BACKUP_DIR" || true
+  chown -R "$USERNAME":"$USERNAME" "$BACKUP_DIR" || true
+  log " - Backed up existing keyrings to $BACKUP_DIR"
+fi
+
+rm -f "$KEYRINGS_DIR"/*.keyring "$KEYRINGS_DIR"/default "$KEYRINGS_DIR"/user.keystore 2>/dev/null || true
+
+echo -n "Default_keyring" > "$DEFAULT_POINTER_FILE"
+cat >"$DEFAULT_RING_FILE" <<'EOF'
+[keyring]
+display-name=Default keyring
+ctime=0
+mtime=0
+lock-on-idle=false
+lock-after=false
+EOF
+
+chmod 700 "$KEYRINGS_DIR" || true
+chmod 600 "$DEFAULT_RING_FILE" || true
+chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.local" || true
+log " - Created plaintext default keyring (no password) for $USERNAME"
+
+######################################################################################
+
+log "14) Ensure latest Wi-Fi reconnects after reboot (by SSID)"
+ensure_latest_wifi_autoconnect() {
+  if ! command -v nmcli >/dev/null 2>&1; then
+    log " - nmcli not available; skipping Wi-Fi autoconnect setup."
+    return
+  fi
+
+  if ! systemctl is-active --quiet NetworkManager 2>/dev/null && ! systemctl is-enabled --quiet NetworkManager 2>/dev/null; then
+    log " - NetworkManager not running; skipping Wi-Fi autoconnect setup."
+    return
+  fi
+
+  if ! nmcli general status >/dev/null 2>&1; then
+    log " - NetworkManager not responding; skipping Wi-Fi autoconnect setup."
+    return
+  fi
+
+  local wifi_uuid wifi_name wifi_ssid wifi_if psk active_ssid conn_path conn_name
+
+  wifi_if="${WIFI_IF:-$(nmcli -t -f DEVICE,TYPE,STATE dev status | awk -F: '$3=="connected" && $2=="wifi"{print $1; exit}' || true)}"
+  wifi_ssid="${WIFI_SSID:-$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true)}"
+  [ -n "${WIFI_PSK:-}" ] && psk="$WIFI_PSK"
+
+  if [ -z "${wifi_ssid:-}" ]; then
+    log " - No active Wi-Fi SSID detected; connect once manually and re-run."
+    return
+  fi
+
+  # If explicit Wi-Fi credentials were provided, ensure netplan does not override and write a persistent NM profile
+  if [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ]; then
+    # Remove any netplan YAML that defines wifis: to stop the netplan NM generator from re-creating ephemeral profiles
+    for f in /etc/netplan/*.yaml; do
+      [ -f "$f" ] || continue
+      if grep -Eq '^[[:space:]]*wifis:' "$f"; then
+        cp "$f" "$f.bak.$(date +%s)" || true
+        rm -f "$f" || true
+        log " - Removed netplan Wi-Fi definition at $f (backup kept)."
+      fi
+    done
+
+    # Drop any runtime netplan-generated Wi-Fi connections for this SSID
+    while IFS=: read -r cand_uuid cand_type; do
+      [ "$cand_type" = "wifi" ] || continue
+      cand_ssid=$(nmcli -t -g 802-11-wireless.ssid connection show "$cand_uuid" 2>/dev/null || true)
+      if [ "$cand_ssid" = "$wifi_ssid" ]; then
+        nmcli connection delete uuid "$cand_uuid" >/dev/null 2>&1 || true
+      fi
+    done < <(nmcli -t -g UUID,TYPE connection show 2>/dev/null || true)
+
+    [ -n "${wifi_if:-}" ] || wifi_if="*"
+    [ "$wifi_if" = "*" ] && wifi_if=""
+    conn_name="wifi-${wifi_ssid// /_}"
+    conn_file="/etc/NetworkManager/system-connections/${conn_name}.nmconnection"
+    conn_uuid="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
+
+    # Remove any old connection files for this SSID (system or runtime)
+    find /etc/NetworkManager/system-connections /run/NetworkManager/system-connections -maxdepth 1 -type f 2>/dev/null \
+      | while read -r f; do
+          if grep -q "ssid=${wifi_ssid}" "$f" 2>/dev/null; then
+            rm -f "$f" || true
+          fi
+        done
+
+    {
+      echo "[connection]"
+      echo "id=${conn_name}"
+      echo "uuid=${conn_uuid}"
+      echo "type=wifi"
+      echo "interface-name=${wifi_if}"
+      echo "autoconnect=true"
+      echo "autoconnect-priority=100"
+      echo "autoconnect-retries=-1"
+      echo "permissions="
+      echo
+      echo "[wifi]"
+      echo "mode=infrastructure"
+      echo "ssid=${wifi_ssid}"
+      echo "mac-address="
+      echo "cloned-mac-address="
+      echo "bssid="
+      echo
+      echo "[wifi-security]"
+      echo "key-mgmt=wpa-psk"
+      echo "psk=${WIFI_PSK}"
+      echo "psk-flags=0"
+      echo
+      echo "[ipv4]"
+      echo "method=auto"
+      echo
+      echo "[ipv6]"
+      echo "method=ignore"
+    } > "$conn_file"
+
+    chmod 600 "$conn_file" || true
+    chown root:root "$conn_file" || true
+    nmcli connection reload >/dev/null 2>&1 || true
+    nmcli connection up id "$conn_name" >/dev/null 2>&1 || true
+    log " - Created system Wi-Fi profile $conn_file for SSID '$wifi_ssid'."
+    wifi_uuid="$conn_uuid"
+    wifi_name="$conn_name"
+    psk="$WIFI_PSK"
+
+    # Also seed a netplan file so NM starts with the PSK before login
+    NETPLAN_WIFI="/etc/netplan/90-wifi-autoconnect.yaml"
+    {
+      echo "network:"
+      echo "  version: 2"
+      echo "  renderer: NetworkManager"
+      echo "  wifis:"
+      echo "    ${wifi_if:-wlan0}:"
+      echo "      dhcp4: true"
+      echo "      dhcp6: false"
+      echo "      access-points:"
+      printf '        "%s":\n' "$wifi_ssid"
+      printf '          password: "%s"\n' "$WIFI_PSK"
+    } > "$NETPLAN_WIFI"
+    chmod 600 "$NETPLAN_WIFI" || true
+    chown root:root "$NETPLAN_WIFI" || true
+    netplan apply >/dev/null 2>&1 || true
+    log " - Seeded netplan Wi-Fi config at $NETPLAN_WIFI"
+  fi
+
+  if [ -z "${wifi_uuid:-}" ]; then
+    wifi_uuid=$(nmcli -t -g UUID,TYPE connection show --active 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}' || true)
+  fi
+  if [ -n "${wifi_uuid:-}" ]; then
+    active_ssid=$(nmcli -t -g 802-11-wireless.ssid connection show "$wifi_uuid" 2>/dev/null || true)
+    if [ "$active_ssid" != "$wifi_ssid" ]; then
+      wifi_uuid=""
+    fi
+  fi
+
+  if [ -z "${wifi_uuid:-}" ]; then
+    wifi_uuid=$(nmcli -t -g UUID connection show 2>/dev/null | while read -r uuid; do
+      ssid=$(nmcli -t -g 802-11-wireless.ssid connection show "$uuid" 2>/dev/null || true)
+      ts=$(nmcli -t -g connection.timestamp connection show "$uuid" 2>/dev/null || echo 0)
+      if [ "$ssid" = "$wifi_ssid" ]; then printf '%s:%s\n' "$ts" "$uuid"; fi
+    done | sort -t: -k1,1nr | head -n1 | cut -d: -f2)
+  fi
+
+  if [ -n "${wifi_uuid:-}" ]; then
+    wifi_name=$(nmcli -t -g NAME connection show "$wifi_uuid" 2>/dev/null || true)
+    [ -n "$wifi_name" ] || wifi_name="$wifi_uuid"
+    [ -n "${psk:-}" ] || psk=$(nmcli -s -g 802-11-wireless-security.psk connection show --show-secrets "$wifi_uuid" 2>/dev/null | head -n1 || true)
+  fi
+
+  if [ -z "${psk:-}" ]; then
+    log " - No passphrase found for SSID '$wifi_ssid'; pass --wifi-ssid=... --wifi-psk=... and re-run."
+    return
+  fi
+
+  if ! nmcli connection modify "$wifi_uuid" \
+    connection.autoconnect yes \
+    connection.autoconnect-priority 100 \
+    connection.autoconnect-retries -1 \
+    connection.permissions "" \
+    connection.autoconnect-slaves -1 \
+    802-11-wireless.ssid "$wifi_ssid" \
+    802-11-wireless.mode infrastructure \
+    802-11-wireless.bssid "" \
+    802-11-wireless.mac-address "" \
+    802-11-wireless.cloned-mac-address "" \
+    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.psk "${psk:-}" \
+    802-11-wireless-security.psk-flags 0 \
+    ipv4.method auto \
+    ipv6.method ignore >/dev/null 2>&1; then
+    log " - WARNING: failed to mark Wi-Fi autoconnect for '$wifi_name'."
+    return
+  fi
+
+  nmcli connection save "$wifi_uuid" >/dev/null 2>&1 || true
+  conn_path=$(nmcli -t -g connection.filename connection show "$wifi_uuid" 2>/dev/null || true)
+  if [ -n "$conn_path" ] && [ -f "$conn_path" ]; then
+    chmod 600 "$conn_path" 2>/dev/null || true
+    chown root:root "$conn_path" 2>/dev/null || true
+  fi
+
+  nmcli connection reload >/dev/null 2>&1 || true
+  if [ -n "${wifi_if:-}" ]; then
+    nmcli connection up uuid "$wifi_uuid" ifname "$wifi_if" >/dev/null 2>&1 || true
+  else
+    nmcli connection up uuid "$wifi_uuid" >/dev/null 2>&1 || true
+  fi
+
+  log " - Wi-Fi '$wifi_name' (SSID: $wifi_ssid) set to autoconnect for all users."
+}
+ensure_latest_wifi_autoconnect
 
 ######################################################################################
 
