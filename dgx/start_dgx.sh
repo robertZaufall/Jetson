@@ -15,9 +15,11 @@ GIT_EMAIL=${GIT_EMAIL:-}
 WIFI_SSID=${WIFI_SSID:-}
 WIFI_PSK=${WIFI_PSK:-}
 WIFI_IF=${WIFI_IF:-}
+PURGE_NETPLAN_WIFI=${PURGE_NETPLAN_WIFI:-0}
+WIFI_BOOT_BOUNCE=${WIFI_BOOT_BOUNCE:-1}
 
 usage() {
-  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP] [--git-user=NAME --git-email=EMAIL] [--wifi-ssid=SSID --wifi-psk=PASS [--wifi-if=IFACE]]"
+  echo "Usage: $0 [--reboot|--no-reboot] [--mks] [--k3s] [--hostname=NAME] [REG=IP|--reg=IP] [--git-user=NAME --git-email=EMAIL] [--wifi-ssid=SSID --wifi-psk=PASS [--wifi-if=IFACE]] [--purge-netplan-wifi] [--no-wifi-bounce]"
 }
 
 for arg in "$@"; do
@@ -32,6 +34,8 @@ for arg in "$@"; do
     --wifi-ssid=*) WIFI_SSID="${arg#*=}" ;;
     --wifi-psk=*) WIFI_PSK="${arg#*=}" ;;
     --wifi-if=*) WIFI_IF="${arg#*=}" ;;
+    --purge-netplan-wifi) PURGE_NETPLAN_WIFI=1 ;;
+    --no-wifi-bounce) WIFI_BOOT_BOUNCE=0 ;;
     REG=*) REG_IP="${arg#*=}" ;;
     --reg=*) REG_IP="${arg#*=}" ;;
     --help|-h) usage; exit 0 ;;
@@ -537,6 +541,64 @@ ensure_latest_wifi_autoconnect() {
     return
   fi
 
+  purge_netplan_wifi_artifacts() {
+    local ssid="$1"
+    [ -n "$ssid" ] || return
+    [ "${PURGE_NETPLAN_WIFI}" -eq 1 ] || return
+
+    for f in /etc/netplan/*.yaml; do
+      [ -f "$f" ] || continue
+      if grep -Eq '^[[:space:]]*wifis:' "$f" || grep -F "\"$ssid\"" "$f" >/dev/null 2>&1; then
+        cp "$f" "$f.bak.$(date +%s)" || true
+        rm -f "$f" || true
+        log " - Removed netplan Wi-Fi definition at $f (backup kept)."
+      fi
+    done
+
+    while IFS=: read -r cand_uuid cand_name cand_type; do
+      [ "$cand_type" = "802-11-wireless" ] || continue
+      cand_ssid=$(nmcli -t -g 802-11-wireless.ssid connection show "$cand_uuid" 2>/dev/null || true)
+      cand_path=$(nmcli -t -g connection.filename connection show "$cand_uuid" 2>/dev/null || true)
+
+      # Always remove netplan-generated Wi-Fi profiles
+      if echo "$cand_name" | grep -q '^netplan-' || echo "$cand_path" | grep -q '/netplan'; then
+        nmcli connection delete uuid "$cand_uuid" >/dev/null 2>&1 || true
+        log " - Deleted netplan Wi-Fi connection $cand_name ($cand_uuid)."
+      # If explicit credentials provided, also replace other profiles for this SSID
+      elif [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ] && [ "$cand_ssid" = "$ssid" ]; then
+        nmcli connection delete uuid "$cand_uuid" >/dev/null 2>&1 || true
+        log " - Replaced existing Wi-Fi profile $cand_name ($cand_uuid) for SSID '$ssid'."
+      fi
+    done < <(nmcli -t -g UUID,NAME,TYPE connection show 2>/dev/null || true)
+
+    nmcli connection reload >/dev/null 2>&1 || true
+  }
+
+  purge_netplan_wifi_artifacts "$wifi_ssid"
+
+  remove_conflicting_wifi_profiles() {
+    local ssid="$1"
+    [ -n "$ssid" ] || return
+    local replace_all=0
+    if [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ]; then
+      replace_all=1
+    fi
+
+    while IFS=: read -r cand_uuid cand_name cand_type; do
+      [ "$cand_type" = "802-11-wireless" ] || continue
+      cand_ssid=$(nmcli -t -g 802-11-wireless.ssid connection show "$cand_uuid" 2>/dev/null || true)
+      [ "$cand_ssid" = "$ssid" ] || continue
+      cand_psk=$(nmcli -s -g 802-11-wireless-security.psk connection show --show-secrets "$cand_uuid" 2>/dev/null | head -n1 || true)
+      cand_psk_flags=$(nmcli -t -g 802-11-wireless-security.psk-flags connection show "$cand_uuid" 2>/dev/null || echo 0)
+      if [ "$replace_all" -eq 1 ] || [ -z "$cand_psk" ] || [ "${cand_psk_flags:-0}" -ne 0 ]; then
+        nmcli connection delete uuid "$cand_uuid" >/dev/null 2>&1 || true
+        log " - Deleted Wi-Fi profile for SSID '$ssid': $cand_name ($cand_uuid)."
+      fi
+    done < <(nmcli -t -g UUID,NAME,TYPE connection show 2>/dev/null || true)
+  }
+
+  remove_conflicting_wifi_profiles "$wifi_ssid"
+
   # If explicit Wi-Fi credentials were provided, ensure netplan does not override and write a persistent NM profile
   if [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ]; then
     # Remove any netplan YAML that defines wifis: to stop the netplan NM generator from re-creating ephemeral profiles
@@ -559,76 +621,26 @@ ensure_latest_wifi_autoconnect() {
     done < <(nmcli -t -g UUID,TYPE connection show 2>/dev/null || true)
 
     [ -n "${wifi_if:-}" ] || wifi_if="*"
-    [ "$wifi_if" = "*" ] && wifi_if=""
     conn_name="wifi-${wifi_ssid// /_}"
-    conn_file="/etc/NetworkManager/system-connections/${conn_name}.nmconnection"
-    conn_uuid="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
 
-    # Remove any old connection files for this SSID (system or runtime)
-    find /etc/NetworkManager/system-connections /run/NetworkManager/system-connections -maxdepth 1 -type f 2>/dev/null \
-      | while read -r f; do
-          if grep -q "ssid=${wifi_ssid}" "$f" 2>/dev/null; then
-            rm -f "$f" || true
-          fi
-        done
+    nmcli connection delete id "$conn_name" >/dev/null 2>&1 || true
 
-    {
-      echo "[connection]"
-      echo "id=${conn_name}"
-      echo "uuid=${conn_uuid}"
-      echo "type=wifi"
-      echo "interface-name=${wifi_if}"
-      echo "autoconnect=true"
-      echo "autoconnect-priority=100"
-      echo "autoconnect-retries=-1"
-      echo "permissions="
-      echo
-      echo "[wifi]"
-      echo "mode=infrastructure"
-      echo "ssid=${wifi_ssid}"
-      echo "mac-address="
-      echo "cloned-mac-address="
-      echo "bssid="
-      echo
-      echo "[wifi-security]"
-      echo "key-mgmt=wpa-psk"
-      echo "psk=${WIFI_PSK}"
-      echo "psk-flags=0"
-      echo
-      echo "[ipv4]"
-      echo "method=auto"
-      echo
-      echo "[ipv6]"
-      echo "method=ignore"
-    } > "$conn_file"
+    if ! nmcli connection add type wifi ifname "$wifi_if" con-name "$conn_name" ssid "$wifi_ssid" \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$WIFI_PSK" \
+      ipv4.method auto ipv6.method ignore connection.autoconnect yes connection.autoconnect-priority 100 connection.permissions "" >/dev/null 2>&1; then
+      log " - WARNING: failed to create Wi-Fi profile for '$wifi_ssid'."
+    fi
 
-    chmod 600 "$conn_file" || true
-    chown root:root "$conn_file" || true
-    nmcli connection reload >/dev/null 2>&1 || true
-    nmcli connection up id "$conn_name" >/dev/null 2>&1 || true
-    log " - Created system Wi-Fi profile $conn_file for SSID '$wifi_ssid'."
-    wifi_uuid="$conn_uuid"
+    nmcli connection modify "$conn_name" \
+      802-11-wireless.mode infrastructure \
+      802-11-wireless.hidden no \
+      802-11-wireless-security.psk-flags 0 >/dev/null 2>&1 || true
+
+    nmcli connection up id "$conn_name" ${wifi_if:+ifname "$wifi_if"} >/dev/null 2>&1 || true
+    log " - Created system Wi-Fi profile '$conn_name' for SSID '$wifi_ssid'."
+    wifi_uuid=$(nmcli -t -g UUID connection show "$conn_name" 2>/dev/null || true)
     wifi_name="$conn_name"
     psk="$WIFI_PSK"
-
-    # Also seed a netplan file so NM starts with the PSK before login
-    NETPLAN_WIFI="/etc/netplan/90-wifi-autoconnect.yaml"
-    {
-      echo "network:"
-      echo "  version: 2"
-      echo "  renderer: NetworkManager"
-      echo "  wifis:"
-      echo "    ${wifi_if:-wlan0}:"
-      echo "      dhcp4: true"
-      echo "      dhcp6: false"
-      echo "      access-points:"
-      printf '        "%s":\n' "$wifi_ssid"
-      printf '          password: "%s"\n' "$WIFI_PSK"
-    } > "$NETPLAN_WIFI"
-    chmod 600 "$NETPLAN_WIFI" || true
-    chown root:root "$NETPLAN_WIFI" || true
-    netplan apply >/dev/null 2>&1 || true
-    log " - Seeded netplan Wi-Fi config at $NETPLAN_WIFI"
   fi
 
   if [ -z "${wifi_uuid:-}" ]; then
@@ -695,6 +707,65 @@ ensure_latest_wifi_autoconnect() {
   fi
 
   log " - Wi-Fi '$wifi_name' (SSID: $wifi_ssid) set to autoconnect for all users."
+
+  if [ "${WIFI_BOOT_BOUNCE}" -eq 1 ] && [ -n "${wifi_ssid:-}" ]; then
+    WIFI_BOOT_UNIT="/etc/systemd/system/wifi-autoconnect.service"
+    BOOT_CONN="${wifi_name:-wifi-${wifi_ssid// /_}}"
+    ssid_safe=$(printf '%q' "$wifi_ssid")
+    boot_conn_safe=$(printf '%q' "$BOOT_CONN")
+    psk_safe=$(printf '%q' "${psk:-}")
+    WIFI_BOOT_HELPER="/usr/local/sbin/wifi-autoconnect.sh"
+    cat > "$WIFI_BOOT_HELPER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSID=${ssid_safe}
+PSK=${psk_safe}
+CONN=${boot_conn_safe}
+IFACE=${wifi_if:-}
+
+# Wait for NM and a Wi-Fi device to appear (up to 60s)
+dev=""
+for _ in \$(seq 1 20); do
+  dev=\$(nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null | awk -F: '\$2=="wifi"{print \$1; exit}')
+  [ -n "\$dev" ] && break
+  sleep 3
+done
+
+# Bounce radio then try to bring up the connection by name, fall back to SSID+PSK
+nmcli radio wifi off || true
+sleep 2
+nmcli radio wifi on || true
+sleep 3
+
+if [ -n "\$dev" ]; then
+  nmcli connection up id "\$CONN" ifname "\$dev" || nmcli device wifi connect "\$SSID" password "\$PSK" ifname "\$dev" || true
+else
+  nmcli connection up id "\$CONN" || nmcli device wifi connect "\$SSID" password "\$PSK" || true
+fi
+EOF
+    chmod 700 "$WIFI_BOOT_HELPER" || true
+
+    cat > "$WIFI_BOOT_UNIT" <<EOF
+[Unit]
+Description=Force Wi-Fi autoconnect for ${wifi_ssid}
+After=NetworkManager.service network-online.target
+Wants=NetworkManager.service network-online.target
+After=NetworkManager-wait-online.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${WIFI_BOOT_HELPER}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$WIFI_BOOT_UNIT" || true
+    systemctl daemon-reload || true
+    systemctl enable --now wifi-autoconnect.service || true
+    log " - Installed wifi-autoconnect.service to bounce Wi-Fi and bring up SSID '$wifi_ssid' on boot."
+  fi
 }
 ensure_latest_wifi_autoconnect
 
