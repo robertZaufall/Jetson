@@ -42,9 +42,22 @@ log(){ printf '\n=== %s ===\n' "$*"; }
 apt_install_retry() {
   # Usage: apt_install_retry pkg1 [pkg2 ...]
   # Be resilient to transient DNS/network hiccups
+  local missing_pkgs=() pkg status
+  for pkg in "$@"; do
+    status=$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)
+    if ! printf '%s' "$status" | grep -q 'install ok installed'; then
+      missing_pkgs+=("$pkg")
+    fi
+  done
+
+  # Avoid `apt-get update` (and DNS lookups) when everything is already installed.
+  if [ "${#missing_pkgs[@]}" -eq 0 ]; then
+    return 0
+  fi
+
   DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
     -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "$@" || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "${missing_pkgs[@]}" || return 1
 }
 
 # Detect L4T version (e.g., 36.4.4 or 38.2.0) -> L4T_MAJOR/L4T_MINOR
@@ -1175,45 +1188,57 @@ systemctl restart jtop.service || true
 
 ######################################################################################
 
-log "17) Ensure swapfile size is $SWAP_SIZE (auto-default 8G/16G)"
-to_bytes() {
-  local s="$1"
-  if command -v numfmt >/dev/null 2>&1; then
-    numfmt --from=iec "$s" 2>/dev/null && return 0
-  fi
-  case "$s" in
-    *[Gg]*) echo $(( ${s%[Gg]*} * 1073741824 ));;
-    *[Mm]*) echo $(( ${s%[Mm]*} * 1048576 ));;
-    *[Kk]*) echo $(( ${s%[Kk]*} * 1024 ));;
-    *) echo "$s";;
-  esac
-}
-DESIRED_BYTES=$(to_bytes "$SWAP_SIZE")
-if [ -z "$DESIRED_BYTES" ] || [ "$DESIRED_BYTES" -le 0 ]; then
-  DESIRED_BYTES=$((8*1024*1024*1024))
-fi
-
-CURRENT_BYTES=0
-[ -f /swapfile ] && CURRENT_BYTES=$(stat -c %s /swapfile 2>/dev/null || echo 0)
-
-if [ "$CURRENT_BYTES" -eq "$DESIRED_BYTES" ]; then
-  log " - Existing /swapfile already $SWAP_SIZE; leaving as-is."
-else
-  log " - (Re)creating /swapfile to $SWAP_SIZE"
+log "17) Configure swapfile (auto-default 8G/16G; disabled on Thor)"
+if [ "${L4T_MAJOR:-0}" -ge 38 ]; then
+  log " - Thor detected; removing /swapfile and disabling swap at boot"
   swapoff /swapfile 2>/dev/null || true
-  rm -f /swapfile
-  if fallocate -l "$DESIRED_BYTES" /swapfile 2>/dev/null; then
-    :
-  else
-    dd if=/dev/zero of=/swapfile bs=1M count=$((DESIRED_BYTES/1048576)) status=none || true
+  rm -f /swapfile || true
+  if [ -f /etc/fstab ]; then
+    sed -i -E '/^[[:space:]]*\/swapfile\b/d' /etc/fstab || true
   fi
-  chmod 600 /swapfile
-  mkswap /swapfile
-  swapon /swapfile
-  if grep -qE '^/swapfile\b' /etc/fstab; then
-    sed -i -E 's#^/swapfile\s+.*#/swapfile none swap sw 0 0#' /etc/fstab
+  systemctl stop swapfile.swap 2>/dev/null || true
+  systemctl disable swapfile.swap 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+else
+  to_bytes() {
+    local s="$1"
+    if command -v numfmt >/dev/null 2>&1; then
+      numfmt --from=iec "$s" 2>/dev/null && return 0
+    fi
+    case "$s" in
+      *[Gg]*) echo $(( ${s%[Gg]*} * 1073741824 ));;
+      *[Mm]*) echo $(( ${s%[Mm]*} * 1048576 ));;
+      *[Kk]*) echo $(( ${s%[Kk]*} * 1024 ));;
+      *) echo "$s";;
+    esac
+  }
+  DESIRED_BYTES=$(to_bytes "$SWAP_SIZE")
+  if [ -z "$DESIRED_BYTES" ] || [ "$DESIRED_BYTES" -le 0 ]; then
+    DESIRED_BYTES=$((8*1024*1024*1024))
+  fi
+
+  CURRENT_BYTES=0
+  [ -f /swapfile ] && CURRENT_BYTES=$(stat -c %s /swapfile 2>/dev/null || echo 0)
+
+  if [ "$CURRENT_BYTES" -eq "$DESIRED_BYTES" ]; then
+    log " - Existing /swapfile already $SWAP_SIZE; leaving as-is."
   else
-    printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+    log " - (Re)creating /swapfile to $SWAP_SIZE"
+    swapoff /swapfile 2>/dev/null || true
+    rm -f /swapfile
+    if fallocate -l "$DESIRED_BYTES" /swapfile 2>/dev/null; then
+      :
+    else
+      dd if=/dev/zero of=/swapfile bs=1M count=$((DESIRED_BYTES/1048576)) status=none || true
+    fi
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    if grep -qE '^/swapfile\b' /etc/fstab; then
+      sed -i -E 's#^/swapfile\s+.*#/swapfile none swap sw 0 0#' /etc/fstab
+    else
+      printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
   fi
 fi
 
