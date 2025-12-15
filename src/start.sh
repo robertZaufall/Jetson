@@ -1337,11 +1337,16 @@ if ! command -v docker >/dev/null 2>&1; then
 $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
 tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
   systemctl enable --now docker || true
 else
   log " - Docker already installed; ensuring plugins present"
-  apt-get install -y docker-buildx-plugin docker-compose-plugin || true
+  apt-get install -y docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras || true
+
+  log " - Upgrading Docker Engine and plugins"
+  # If running manually (non-root):
+  # sudo apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
+  apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
 fi
 
 ######################################################################################
