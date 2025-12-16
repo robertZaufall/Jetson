@@ -1540,7 +1540,7 @@ if [ -d "$TARGET_DIR" ]; then
   log " - $TARGET_DIR already exists; skipping clone and install.sh"
 else
   log " - Cloning jetson-containers"
-  sudo -u "$USERNAME" git clone https://github.com/dusty-nv/jetson-containers "$TARGET_DIR" || true
+  sudo -u "$USERNAME" git clone --recursive https://github.com/dusty-nv/jetson-containers "$TARGET_DIR" || true
   # Run install.sh if present after clone
   if [ -x "$TARGET_DIR/install.sh" ]; then
     sudo -u "$USERNAME" bash -lc "cd '$TARGET_DIR' && ./install.sh" || true
