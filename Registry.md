@@ -34,8 +34,21 @@ cd ~/docker/certs
 # subsequent steps have to be adapted in this case
 
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
+```
+  
+each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5555: registry)
 
-# each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5555: registry)
+```
+mkdir -p ~/.docker/certs.d/registry.local:5001
+mkdir -p ~/.docker/certs.d/registry.local:5002
+mkdir -p ~/.docker/certs.d/registry.local:5555
+cp domain.crt ~/.docker/certs.d/registry.local:5001/ca.crt
+cp domain.crt ~/.docker/certs.d/registry.local:5002/ca.crt
+cp domain.crt ~/.docker/certs.d/registry.local:5555/ca.crt
+```
+
+deprecated (not officially supported)  
+```
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555
@@ -43,8 +56,8 @@ cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.loca
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002/ca.crt
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555/ca.crt
 ```
-
-## Registry container
+  
+# Registry container
 create `config_registry.yml` in `~/docker/config`  
 ```
 version: 0.1
