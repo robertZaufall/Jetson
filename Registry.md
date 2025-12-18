@@ -197,7 +197,7 @@ sudo chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt
 ```
 
-Mofify `daemon.json` and restart docker:
+Modify `daemon.json` and restart docker:
 ```
 sudo nano /etc/docker/daemon.json
 sudo systemctl restart docker
