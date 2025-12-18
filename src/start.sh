@@ -1725,14 +1725,17 @@ if [ -n "${REG_IP:-}" ]; then
       for d in \
         /etc/docker/certs.d/registry.local:5001 \
         /etc/docker/certs.d/registry.local:5002 \
+        /etc/docker/certs.d/registry.local:5003 \
         /etc/docker/certs.d/registry.local:5555; do
         install -d -m 0755 "$d" || true
       done
       cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5001/ca.crt
       cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5002/ca.crt
+      cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5003/ca.crt
       cp "$CERT_SRC" /etc/docker/certs.d/registry.local:5555/ca.crt
       chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt || true
       chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt || true
+      chmod 644 /etc/docker/certs.d/registry.local:5003/ca.crt || true
       chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt || true
       log " - Installed domain.crt to Docker certs.d for registry.local"
     else
