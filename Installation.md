@@ -59,10 +59,17 @@ sudo apt install nano btop curl git-lfs -y
 jtop installation
 ```
 sudo apt install python3-pip -y
+
+# new
+sudo pip3 install -U pip setuptools wheel
+sudo pip3 install --upgrade --force-reinstall git+https://github.com/rbonghi/jetson_stats.git
+sudo jtop --install-service
+
+# old
 sudo pip3 install -U jetson-stats
 sudo systemctl restart jtop.service
-jtop
 ```
+
 If "jetpack" is found missing or jtop outdated, the version numbers can be added manually at   
 `/usr/local/lib/python3.10/dist-packages/jtop/core/jetson_variables.py` by adding the line  
 `"36.4.4": "6.2.1",` and a restart  
