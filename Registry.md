@@ -1,10 +1,23 @@
 # Local Container Registry and mirrors for Jetson (here: on `MACOS` platform)
 
+## Is this plausible on macOS?
+Yes — if the macOS machine is only used as a **network-accessible registry service** (local registry + pull-through cache) for your Jetson devices.
+
+What this **does**:
+- Caches image layers on your LAN so Jetsons pull faster and you reduce external registry traffic.
+- Lets you `docker push` locally-built images into a LAN registry (`registry.local:5555`) and pull them from Jetsons.
+
+What this **does not** do:
+- It does **not** make Jetson/L4T GPU images runnable on macOS (even on Apple Silicon). This setup is about **pulling and caching**, not running.
+
+Remark on naming: `registry.local` is used as a convenient hostname. Jetsons must resolve it to your Mac's LAN IP (not `127.0.0.1`).
+
 ## Add folders
 ```
 mkdir ~/docker/registry
 mkdir ~/docker/mirror_docker_io
 mkdir ~/docker/mirror_nvcr_io
+mkdir ~/docker/mirror_ghcr_io
 mkdir ~/docker/certs
 mkdir ~/docker/config
 ```
@@ -36,14 +49,16 @@ cd ~/docker/certs
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/docker/certs/domain.crt
 ```
   
-each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5555: registry)
+each registry and mirror needs a separate entry (5001: docker.io, 5002: nvcr.io, 5003: ghcr.io, 5555: registry)
 
 ```
 mkdir -p ~/.docker/certs.d/registry.local:5001
 mkdir -p ~/.docker/certs.d/registry.local:5002
+mkdir -p ~/.docker/certs.d/registry.local:5003
 mkdir -p ~/.docker/certs.d/registry.local:5555
 cp domain.crt ~/.docker/certs.d/registry.local:5001/ca.crt
 cp domain.crt ~/.docker/certs.d/registry.local:5002/ca.crt
+cp domain.crt ~/.docker/certs.d/registry.local:5003/ca.crt
 cp domain.crt ~/.docker/certs.d/registry.local:5555/ca.crt
 ```
 
@@ -51,9 +66,11 @@ deprecated (not officially supported)
 ```
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002
+mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5003
 mkdir -p ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5001/ca.crt
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5002/ca.crt
+cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5003/ca.crt
 cp domain.crt ~/Library/Group\ Containers/group.com.docker/certs.d/registry.local:5555/ca.crt
 ```
   
@@ -142,17 +159,39 @@ docker run -d \
   registry:2
 ```
 
+- for ghcr.io (GitHub Container Registry):  
+```
+docker run -d \
+  --name mirror_ghcr_io \
+  -p 5003:5000 \
+  --restart=always \
+  -v ~/docker/config/config_mirror.yml:/etc/docker/registry/config.yml:ro \
+  -v ~/docker/certs/domain.crt:/certs/domain.crt:ro \
+  -v ~/docker/certs/domain.key:/certs/domain.key:ro \
+  -v ~/docker/mirror_ghcr_io:/var/lib/registry \
+  -e REGISTRY_PROXY_REMOTEURL="https://ghcr.io" \
+  registry:2
+```
+
+If you need to cache **private** GHCR images, add credentials (recommended: a GitHub PAT with `read:packages`):
+```
+-e REGISTRY_PROXY_USERNAME="<github-username>" \
+-e REGISTRY_PROXY_PASSWORD="<github-pat>" \
+```
+
 ## Docker on `MACOS`
 Modify `daemon.json` and restart via UI:  
 ```
 {
   "insecure-registries": [],
   "registry-mirrors": [
-    "https://registry.local:5001",
-    "https://registry.local:5002"
+    "https://registry.local:5001"
   ]
 }
 ```
+
+Remark:
+Docker's `registry-mirrors` setting applies to `docker.io` (Docker Hub). For `nvcr.io` / `ghcr.io`, pull via the mirror endpoint explicitly (examples below) to populate the cache.
 
 ## Test
 Check api endpoints for valid certificate:  
@@ -160,6 +199,7 @@ Check api endpoints for valid certificate:
 cd ~/docker/certs
 curl -v --cacert domain.crt https://registry.local:5001/v2/
 curl -v --cacert domain.crt https://registry.local:5002/v2/
+curl -v --cacert domain.crt https://registry.local:5003/v2/
 curl -v --cacert domain.crt https://registry.local:5555/v2/
 ```
 
@@ -167,6 +207,7 @@ Pull/push test images (use `library` as namespace for `docker.io`):
 ```
 docker pull registry.local:5001/library/hello-world:latest
 docker pull registry.local:5002/nvidia/l4t-base:r36.2.0
+docker pull registry.local:5003/nvidia-ai-iot/vllm:latest-jetson-thor
 
 docker tag hello-world registry.local:5555/hello-world
 docker push registry.local:5555/hello-world
@@ -188,16 +229,19 @@ Copy crt file e.g. to git folder by using VSCode Remote and register ca cert for
 ```
 sudo mkdir -p /etc/docker/certs.d/registry.local:5001
 sudo mkdir -p /etc/docker/certs.d/registry.local:5002
+sudo mkdir -p /etc/docker/certs.d/registry.local:5003
 sudo mkdir -p /etc/docker/certs.d/registry.local:5555
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5001/ca.crt
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5002/ca.crt
+sudo cp domain.crt /etc/docker/certs.d/registry.local:5003/ca.crt
 sudo cp domain.crt /etc/docker/certs.d/registry.local:5555/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5001/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5002/ca.crt
+sudo chmod 644 /etc/docker/certs.d/registry.local:5003/ca.crt
 sudo chmod 644 /etc/docker/certs.d/registry.local:5555/ca.crt
 ```
 
-Mofify `daemon.json` and restart docker:
+Modify `daemon.json` and restart docker:
 ```
 sudo nano /etc/docker/daemon.json
 sudo systemctl restart docker
@@ -215,8 +259,7 @@ sudo systemctl restart docker
     "default-runtime": "nvidia",
     "data-root": "/mnt/nova_ssd/docker",
     "registry-mirrors": [
-        "https://registry.local:5001",
-        "https://registry.local:5002"
+        "https://registry.local:5001"
     ]
 }
 ```
@@ -224,6 +267,9 @@ sudo systemctl restart docker
 Remark:  
 Only `docker.io` images are cached by the proxy automatically.
 `nvcr.io` images for example have to be loaded using `registry.local:5002/nvidia/<image>:<tag>` and are then getting cached.  
+`ghcr.io` images have to be loaded using `registry.local:5003/<org-or-user>/<image>:<tag>` and are then getting cached.
+
+If you meant `hcr.io/...`: that is likely a typo for `ghcr.io/...` (GitHub Container Registry).
 
 Push locally built images to registry:  
 ```
@@ -246,6 +292,7 @@ docker
 │   ├── config_mirror.yml
 │   └── config_registry.yml
 ├── mirror_docker_io
+├── mirror_ghcr_io
 ├── mirror_nvcr_io
 └── registry
 ```
@@ -307,4 +354,3 @@ docker login <acr-name>.azurecr.io --username <acr-username> --password <acr-pas
 skopeo login <acr-name>.azurecr.io --username <acr-username> --password <acr-password>
 skopeo copy docker://registry.local:5555/<image>:latest docker://<acr-name>.azurecr.io/<image>:latest
 ```
-
