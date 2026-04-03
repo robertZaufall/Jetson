@@ -5,6 +5,7 @@
 # 0. Set the German keyboard layout for the console, GNOME, and GDM.
 # 1. Install OpenSSH and the base configuration tools.
 # 1.1. Install the NVIDIA JetPack meta-package.
+# 1.2. Install Tailscale from the official apt repository.
 # 2. Disable GNOME idle, lock, and suspend defaults system-wide.
 # 3. Apply no-idle/no-lock settings to the GDM greeter.
 # 4. Disable X11 DPMS and screen blanking at the Xorg level.
@@ -14,12 +15,12 @@
 # 8. Disable virtual console blanking.
 # 9. Disable Wi-Fi powersave in NetworkManager.
 # 10. Optionally install an SSH authorized key and force key-only login.
-# 11. Enable GDM auto-login for the resolved user.
+# 11. Enable GDM auto-login for the target user.
 # 12. Seed an unencrypted GNOME keyring to suppress prompts.
 # 13. Optionally configure VNC with the provided password, using the X11/x11vnc path.
 # 14. Optionally rename the device hostname.
 # 15. Disable `nvzramconfig`.
-# 16. Install and patch `jetson-stats` / `jtop`.
+# 16. Run `fix_jetson_stats.py` to install and patch `jetson-stats` / `jtop`.
 # 17. Configure the swapfile size, or remove swap on Thor.
 # 18. Repair Git and Git LFS permissions under the user's home directory.
 # 19. Set the Jetson power mode.
@@ -54,7 +55,7 @@ GIT_USER=${GIT_USER:-}
 GIT_EMAIL=${GIT_EMAIL:-}
 
 usage() {
-  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=...] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
+  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
 }
 
 for arg in "$@"; do
@@ -66,6 +67,7 @@ for arg in "$@"; do
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
+    SSH_KEY_PATH=*|--ssh-key-path=*) SSH_KEY_PATH="${arg#*=}" ;;
     --mks) MICROK8S=1 ;;
     --k3s) K3S=1 ;;
     --git-user=*) GIT_USER="${arg#*=}" ;;
@@ -98,6 +100,43 @@ apt_install_retry() {
   DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
     -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || true
   DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "${missing_pkgs[@]}" || return 1
+}
+
+is_pkg_installed() {
+  local pkg="$1" status
+  status=$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)
+  printf '%s' "$status" | grep -q 'install ok installed'
+}
+
+install_tailscale_repo() {
+  local dist="$1" keyring_tmp list_tmp
+  keyring_tmp=$(mktemp)
+  list_tmp=$(mktemp)
+
+  if ! curl -fsSL --retry 3 --connect-timeout 15 \
+      "https://pkgs.tailscale.com/stable/ubuntu/${dist}.noarmor.gpg" -o "$keyring_tmp"; then
+    rm -f "$keyring_tmp" "$list_tmp"
+    return 1
+  fi
+  if ! install -m 0644 "$keyring_tmp" /usr/share/keyrings/tailscale-archive-keyring.gpg; then
+    rm -f "$keyring_tmp" "$list_tmp"
+    return 1
+  fi
+
+  if ! curl -fsSL --retry 3 --connect-timeout 15 \
+      "https://pkgs.tailscale.com/stable/ubuntu/${dist}.tailscale-keyring.list" -o "$list_tmp"; then
+    rm -f "$keyring_tmp" "$list_tmp"
+    return 1
+  fi
+  if ! install -m 0644 "$list_tmp" /etc/apt/sources.list.d/tailscale.list; then
+    rm -f "$keyring_tmp" "$list_tmp"
+    return 1
+  fi
+
+  rm -f "$keyring_tmp" "$list_tmp"
+  DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
+    -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 tailscale || return 1
 }
 
 # Detect L4T version (e.g., 36.4.4 or 38.2.0) -> L4T_MAJOR/L4T_MINOR
@@ -161,14 +200,10 @@ if [ -n "${VNC_PASSWORD:-}" ] && [ "${VNC_BACKEND}" = "grd" ] && [ "${VNC_ENCRYP
   VNC_NO_ENCRYPTION=1
 fi
 
-resolve_user() {
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then printf '%s' "$SUDO_USER"; return; fi
-  if logname >/dev/null 2>&1; then ln=$(logname 2>/dev/null || true); [ -n "$ln" ] && [ "$ln" != "root" ] && { printf '%s' "$ln"; return; }; fi
-  awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd
-}
-USERNAME="$(resolve_user)"
-[ -n "$USERNAME" ] || { echo "ERROR: could not resolve a non-root user." >&2; exit 1; }
-HOME_DIR=$(getent passwd "$USERNAME" | cut -d: -f6)
+USERNAME="jetson"
+USER_ENTRY=$(getent passwd "$USERNAME" || true)
+[ -n "$USER_ENTRY" ] || { echo "ERROR: required user '$USERNAME' does not exist." >&2; exit 1; }
+HOME_DIR=$(printf '%s\n' "$USER_ENTRY" | cut -d: -f6)
 log "Target user: $USERNAME ($HOME_DIR)"
 
 # Detect platform (L4T and device) for cross-version behavior (Orin NX/Nano 36.4.4, Thor 38.2)
@@ -249,6 +284,29 @@ fi
 log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
 if ! apt_install_retry nvidia-jetpack; then
   log " - WARNING: could not install nvidia-jetpack now (repo/DNS?). Skipping."
+fi
+
+######################################################################################
+
+log "1.2) Install Tailscale"
+if is_pkg_installed tailscale; then
+  log " - Tailscale already installed; ensuring tailscaled is enabled."
+  systemctl enable --now tailscaled || true
+else
+  TAILSCALE_DIST="${UBUNTU_CODENAME:-noble}"
+  case "$TAILSCALE_DIST" in
+    jammy|noble) ;;
+    *)
+      log " - WARNING: unsupported Ubuntu codename '$TAILSCALE_DIST'; falling back to noble"
+      TAILSCALE_DIST="noble"
+      ;;
+  esac
+
+  if install_tailscale_repo "$TAILSCALE_DIST"; then
+    systemctl enable --now tailscaled || true
+  else
+    log " - WARNING: could not install Tailscale now (repo/DNS?). Skipping."
+  fi
 fi
 
 ######################################################################################
@@ -578,6 +636,7 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
   USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
   USER_BUS="/run/user/${USER_UID}/bus"
   TIMEOUT="timeout 10s"
+  sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
 
     # Force X11-only VNC regardless of requested backend
     if [ "${VNC_BACKEND}" != "x11vnc" ]; then
@@ -1040,191 +1099,15 @@ fi
 
 ######################################################################################
 
-log "16) Install jetson-stats (jtop) and patch version mapping"
-# Thor (L4T 38.x): install jtop in a dedicated venv under /opt/jtop without --break-system-packages
-if [ "${L4T_MAJOR:-0}" -ge 38 ]; then
-  log " - Detected Thor (L4T ${L4T_VERSION:-unknown}); installing jtop in /opt/jtop virtualenv"
-  # Ensure prerequisites
-  if ! apt_install_retry python3-venv python3-pip git; then
-    apt-get install -y python3-venv python3-pip git || true
+log "16) Install jetson-stats (jtop) via fix_jetson_stats.py"
+JTOP_FIX_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fix_jetson_stats.py"
+if [ -f "$JTOP_FIX_SCRIPT" ]; then
+  if ! python3 "$JTOP_FIX_SCRIPT" --user "$USERNAME"; then
+    log " - WARNING: fix_jetson_stats.py failed; inspect the output above."
   fi
-
-  # Clean any existing jtop setup
-  systemctl stop jtop 2>/dev/null || true
-  systemctl disable jtop 2>/dev/null || true
-  rm -f /usr/local/bin/jtop
-  rm -rf /etc/jtop /var/log/jtop
-  rm -rf ~/.local/lib/python*/site-packages/jtop* ~/.local/lib/python*/site-packages/jetson_stats* 2>/dev/null || true
-
-  # Ensure /opt/jtop exists (do not wipe existing to allow updates)
-  install -d -m 0755 /opt/jtop
-  chown root:root /opt/jtop || true
-
-  # Create venv and upgrade pip stack
-  if [ ! -x /opt/jtop/venv/bin/pip ]; then
-    python3 -m venv /opt/jtop/venv || true
-  fi
-  /opt/jtop/venv/bin/pip install --upgrade pip setuptools wheel || true
-
-  # Clone jetson_stats and merge PR #698
-  if [ ! -d /opt/jtop/jetson_stats/.git ]; then
-    git clone https://github.com/rbonghi/jetson_stats.git /opt/jtop/jetson_stats || true
-  fi
-  if [ -d /opt/jtop/jetson_stats/.git ]; then
-    (
-      set -e
-      cd /opt/jtop/jetson_stats
-      git fetch origin || true
-      git checkout master || true
-      git reset --hard origin/master || true
-      git config user.name "jtop-setup" || true
-      git config user.email "root@localhost" || true
-      git fetch origin pull/698/head:pr-698 || true
-      if ! git merge --no-edit -X theirs pr-698; then
-        echo "WARNING: jtop PR #698 merge failed; proceeding without it" >&2
-      fi
-    ) || true
-  fi
-
-  # Install NVML deps and jtop from the repo into the venv
-  /opt/jtop/venv/bin/pip install --upgrade nvidia-ml-py nvidia-ml-py3 || true
-  if [ -d /opt/jtop/jetson_stats ]; then
-    /opt/jtop/venv/bin/pip install -e /opt/jtop/jetson_stats || true
-  fi
-
-  # Wrapper in PATH
-  cat >/usr/local/bin/jtop <<'EOF'
-#!/usr/bin/env bash
-exec /opt/jtop/venv/bin/jtop "$@"
-EOF
-  chmod +x /usr/local/bin/jtop
-
-  # Systemd service for jtop daemon
-  cat >/etc/systemd/system/jtop.service <<'EOF'
-[Unit]
-Description=Jetson Stats (jtop) - Thor + NVML
-After=network.target multi-user.target
-
-[Service]
-Type=simple
-Environment=JTOP_SERVICE=True
-ExecStart=/opt/jtop/venv/bin/jtop --force
-Restart=on-failure
-RestartSec=2s
-TimeoutStartSec=30s
-TimeoutStopSec=30s
-StandardOutput=journal
-StandardError=journal
-WorkingDirectory=/opt/jtop/jetson_stats
-UMask=007
-Group=jtop
-RuntimeDirectory=jtop
-RuntimeDirectoryMode=0770
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # Allow non-root users in 'jtop' group to access the daemon socket/files
-  if ! getent group jtop >/dev/null; then
-    groupadd --system jtop || true
-  fi
-  if ! id -nG "$USERNAME" | tr ' ' '\n' | grep -qx jtop; then
-    usermod -aG jtop "$USERNAME" || true
-  fi
-
-  systemctl daemon-reload || true
-  systemctl enable --now jtop.service || true
-
-  # Quick NVML verification using the venv's python
-  /opt/jtop/venv/bin/python - <<'PY' || true
-import sys
-try:
-    import pynvml as n
-    n.nvmlInit()
-    print("NVML OK - Driver:", n.nvmlSystemGetDriverVersion())
-    cnt = n.nvmlDeviceGetCount()
-    print("NVML GPUs:", cnt)
-    for i in range(cnt):
-        h = n.nvmlDeviceGetHandleByIndex(i)
-        print(f" - GPU{i}:", n.nvmlDeviceGetName(h))
-except Exception as e:
-    print("NVML KO:", e, file=sys.stderr)
-    sys.exit(1)
-PY
-
-  if ! systemctl is-active --quiet jtop 2>/dev/null; then
-    journalctl -u jtop -n 80 --no-pager 2>/dev/null || true
-  fi
-
 else
-  # L4T 36.x and earlier: install via system pip (prefer no --break-system-packages)
-  if ! python3 -c "import jtop" >/dev/null 2>&1; then
-    apt-get install -y python3-pip || true
-    if ! python3 -m pip install -U jetson-stats >/dev/null 2>&1; then
-      if python3 -m pip help install 2>/dev/null | grep -q -- "--break-system-packages"; then
-        python3 -m pip install -U jetson-stats --break-system-packages || true
-      else
-        echo "WARNING: pip install failed and --break-system-packages not supported by this pip." >&2
-        echo "         Consider upgrading pip or using a virtualenv if install keeps failing." >&2
-      fi
-    fi
-    if python3 -c "import jtop; print(jtop.__version__)" >/dev/null 2>&1; then
-      systemctl daemon-reload || true
-      systemctl restart jtop.service || true
-    else
-      echo "ERROR: jtop (jetson-stats) failed to install" >&2
-    fi
-  fi
+  log " - WARNING: $JTOP_FIX_SCRIPT not found; skipping."
 fi
-
-# Patch jetson-stats mappings (supports both system and Thor venv installs)
-JTOP_VARS_FILE=$(python3 - <<'PY'
-import os
-try:
-    import jtop.core.jetson_variables as v
-    print(os.path.abspath(v.__file__))
-except Exception:
-    pass
-PY
-)
-# If not found via system python, try Thor venv python
-if [ -z "$JTOP_VARS_FILE" ] && [ -x /opt/jtop/venv/bin/python ]; then
-  JTOP_VARS_FILE=$(/opt/jtop/venv/bin/python - <<'PY'
-import os
-try:
-    import jtop.core.jetson_variables as v
-    print(os.path.abspath(v.__file__))
-except Exception:
-    pass
-PY
-  )
-fi
-# Fallback to common filesystem locations
-if [ -z "$JTOP_VARS_FILE" ]; then
-  for p in \
-    /opt/jtop/venv/lib/python*/site-packages/jtop/core/jetson_variables.py \
-    /usr/local/lib/python*/dist-packages/jtop/core/jetson_variables.py \
-    /usr/lib/python*/dist-packages/jtop/core/jetson_variables.py; do
-    for f in $p; do
-      [ -f "$f" ] && { JTOP_VARS_FILE="$f"; break; }
-    done
-    [ -n "$JTOP_VARS_FILE" ] && break
-  done
-fi
-
-if [ -f "$JTOP_VARS_FILE" ]; then
-  if ! grep -q '"36.4.4": "6.2.1",' "$JTOP_VARS_FILE"; then
-    sed -i -E '0,/"36\.4\.3": "6\.2",/s//"36.4.4": "6.2.1",\n    "36.4.3": "6.2",/' "$JTOP_VARS_FILE" || true
-  fi
-  if ! grep -q '"38.2.0": "7.0",' "$JTOP_VARS_FILE"; then
-    sed -i -E '0,/"36\.4\.4": "6\.2\.1",/s//"38.2.0": "7.0",\n    "36.4.4": "6.2.1",/' "$JTOP_VARS_FILE" || true
-  fi
-  if ! grep -q '"38.2.1": "7.0 Rev.1",' "$JTOP_VARS_FILE"; then
-    sed -i -E '0,/"38\.2\.0": "7\.0",/s//"38.2.1": "7.0 Rev.1",\n    "38.2.0": "7.0",/' "$JTOP_VARS_FILE" || true
-  fi
-fi
-systemctl restart jtop.service || true
 
 ######################################################################################
 
@@ -1380,13 +1263,21 @@ tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
   systemctl enable --now docker || true
 else
-  log " - Docker already installed; ensuring plugins present"
-  apt-get install -y docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras || true
+  if is_pkg_installed docker.io; then
+    log " - docker.io detected; skipping Docker CE package upgrade to avoid a package migration."
+  elif is_pkg_installed docker-ce; then
+    log " - Docker CE already installed; ensuring plugins present"
+    apt-get install -y docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras || true
 
-  log " - Upgrading Docker Engine and plugins"
-  # If running manually (non-root):
-  # sudo apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
-  apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
+    log " - Upgrading Docker Engine and plugins"
+    # If running manually (non-root):
+    # sudo apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
+    if ! apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; then
+      log " - WARNING: Docker CE upgrade failed; leaving the existing Docker install in place."
+    fi
+  else
+    log " - Existing Docker install is not managed by docker-ce packages; skipping package upgrade."
+  fi
 fi
 
 ######################################################################################
@@ -1396,10 +1287,15 @@ DAEMON_JSON=/etc/docker/daemon.json
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update -y && apt-get install -y python3 || true
 fi
-python3 - "$DAEMON_JSON" <<'PY'
+NVIDIA_RUNTIME_AVAILABLE=0
+if command -v nvidia-container-runtime >/dev/null 2>&1; then
+  NVIDIA_RUNTIME_AVAILABLE=1
+fi
+python3 - "$DAEMON_JSON" "$NVIDIA_RUNTIME_AVAILABLE" <<'PY'
 import json, os, sys
 
 path = sys.argv[1]
+enable_nvidia = sys.argv[2] == '1'
 data = {}
 try:
     if os.path.exists(path):
@@ -1408,14 +1304,19 @@ try:
 except Exception:
     data = {}
 
-# Ensure NVIDIA runtime is configured
 runtimes = data.get('runtimes', {})
-nvidia = runtimes.get('nvidia', {})
-nvidia['path'] = 'nvidia-container-runtime'
-nvidia['runtimeArgs'] = nvidia.get('runtimeArgs', [])
-runtimes['nvidia'] = nvidia
-data['runtimes'] = runtimes
-data['default-runtime'] = 'nvidia'
+if enable_nvidia:
+    nvidia = runtimes.get('nvidia', {})
+    nvidia['path'] = 'nvidia-container-runtime'
+    nvidia['runtimeArgs'] = nvidia.get('runtimeArgs', [])
+    runtimes['nvidia'] = nvidia
+    data['runtimes'] = runtimes
+    data['default-runtime'] = 'nvidia'
+else:
+    if data.get('default-runtime') == 'nvidia':
+        data.pop('default-runtime', None)
+    if runtimes:
+        data['runtimes'] = runtimes
 
 os.makedirs(os.path.dirname(path), exist_ok=True)
 tmp = path + '.tmp'
@@ -1425,7 +1326,11 @@ os.replace(tmp, path)
 PY
 systemctl daemon-reload || true
 systemctl restart docker || true
-log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
+if [ "$NVIDIA_RUNTIME_AVAILABLE" -eq 1 ]; then
+  log " - Ensured NVIDIA runtime in $DAEMON_JSON and restarted Docker"
+else
+  log " - NVIDIA container runtime not found; left Docker on a non-NVIDIA default runtime."
+fi
 
 ######################################################################################
 
@@ -1548,7 +1453,7 @@ if [ "${MICROK8S}" -eq 1 ]; then
     # System-wide profile script (affects interactive shells)
     echo "$ALIAS_LINE" > /etc/profile.d/microk8s-kubectl.sh
     chmod 644 /etc/profile.d/microk8s-kubectl.sh
-    # Ensure the resolved user's .bashrc also has the alias (idempotent)
+    # Ensure the target user's .bashrc also has the alias (idempotent)
     if ! grep -qxF "$ALIAS_LINE" "$HOME_DIR/.bashrc" 2>/dev/null; then
       echo "$ALIAS_LINE" >> "$HOME_DIR/.bashrc"
     fi
@@ -1575,7 +1480,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 TARGET_DIR="$HOME_DIR/git/jetson-containers"
-install -d -m 0755 "$HOME_DIR/git"
+install -d -m 0755 -o "$USERNAME" -g "$USERNAME" "$HOME_DIR/git"
 if [ -d "$TARGET_DIR" ]; then
   log " - $TARGET_DIR already exists; skipping clone and install.sh"
 else
@@ -1639,7 +1544,7 @@ EOF
   # Derive NODE_IP from the primary route if available
   NODE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src"){print $(i+1); exit}}}')
 
-  # Ensure kube config directory for the resolved user
+  # Ensure kube config directory for the target user
   sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.kube" || true
   chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.kube" || true
 
