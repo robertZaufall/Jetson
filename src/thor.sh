@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+
+# Steps:
+# 1. Validate the required default user, password, and hostname arguments.
+# 2. Resolve the latest JetPack 7 AGX Thor `Linux_for_Tegra` directory and target rootfs.
+# 3. Apply NVIDIA binaries and run flash prerequisites in the JetPack workspace.
+# 4. Pre-create the default user account and hostname in the target image.
+# 5. Preseed a German keyboard layout for the system, GNOME, and GDM in the target rootfs.
+# 6. Optionally enter the rootfs with qemu-user-static to compile dconf defaults and refresh keyboard settings.
+# 7. Optionally generate German and English UTF-8 locales inside the target rootfs.
+# 8. Seed a `clone.sh` helper into `/etc/skel` and the default user's home directory.
+# 9. Flash the Jetson AGX Thor devkit image with `l4t_initrd_flash.sh`.
+
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then

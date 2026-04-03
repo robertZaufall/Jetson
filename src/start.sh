@@ -1,5 +1,45 @@
 #!/usr/bin/env bash
 
+# Execution outline:
+# Preflight. Require root, parse flags, detect the target user/platform, and choose defaults.
+# 0. Set the German keyboard layout for the console, GNOME, and GDM.
+# 1. Install OpenSSH and the base configuration tools.
+# 1.1. Install the NVIDIA JetPack meta-package.
+# 2. Disable GNOME idle, lock, and suspend defaults system-wide.
+# 3. Apply no-idle/no-lock settings to the GDM greeter.
+# 4. Disable X11 DPMS and screen blanking at the Xorg level.
+# 5. Add X11/GNOME session fallbacks that keep the display awake and unlocked.
+# 6. Mask systemd sleep and hibernate targets.
+# 7. Configure logind to ignore lid and suspend keys.
+# 8. Disable virtual console blanking.
+# 9. Disable Wi-Fi powersave in NetworkManager.
+# 10. Optionally install an SSH authorized key and force key-only login.
+# 11. Enable GDM auto-login for the resolved user.
+# 12. Seed an unencrypted GNOME keyring to suppress prompts.
+# 13. Optionally configure VNC with the provided password, using the X11/x11vnc path.
+# 14. Optionally rename the device hostname.
+# 15. Disable `nvzramconfig`.
+# 16. Install and patch `jetson-stats` / `jtop`.
+# 17. Configure the swapfile size, or remove swap on Thor.
+# 18. Repair Git and Git LFS permissions under the user's home directory.
+# 19. Set the Jetson power mode.
+# 20. Install or upgrade Docker Engine and its plugins.
+# 21. Configure Docker to use the NVIDIA runtime by default.
+# 22. Add the user to the `docker` group.
+# 23. Reserved snapd pin/hold logic (currently disabled).
+# 24. Remove preinstalled games and related packages.
+# 25. Optionally install MicroK8s.
+# 26. Clone `jetson-containers` and run `install.sh` if it is missing.
+# 27. Optionally install K3s and its host prerequisites.
+# 28. Optionally install Helm when K3s is enabled.
+# 29. Install `guvcview`.
+# 30. Reserved desktop cleanup step (currently disabled).
+# 31. Optionally configure the local registry host mapping, certificates, and Docker mirrors.
+# 32. Install NVM, Node LTS, and the OpenAI Codex CLI.
+# 33. Optionally configure the global Git identity.
+# 34. Ensure `btop` is installed.
+# Final. Reboot if requested; otherwise print reboot guidance.
+
 set -euo pipefail
 
 # Require root
@@ -1737,6 +1777,41 @@ if [ -n "${REG_IP:-}" ]; then
       log " - Installed domain.crt to Docker certs.d for registry.local"
     else
       log " - WARNING: domain.crt not found at $CERT_SRC; skipping cert installation"
+    fi
+
+    # 31.2.1) Add the registry CA to the OS trust store (Ubuntu) if not already there
+    ca_src=""
+    if [ -f "$CERT_SRC" ]; then
+      ca_src="$CERT_SRC"
+    else
+      for candidate in \
+        /etc/docker/certs.d/registry.local:5001/ca.crt \
+        /etc/docker/certs.d/registry.local:5002/ca.crt \
+        /etc/docker/certs.d/registry.local:5555/ca.crt; do
+        if [ -f "$candidate" ]; then
+          ca_src="$candidate"
+          break
+        fi
+      done
+    fi
+
+    if [ -n "$ca_src" ]; then
+      os_ca_dst="/usr/local/share/ca-certificates/registry-rca.crt"
+      if [ ! -f "$os_ca_dst" ] || ! cmp -s "$ca_src" "$os_ca_dst"; then
+        install -m 0644 "$ca_src" "$os_ca_dst"
+        if ! command -v update-ca-certificates >/dev/null 2>&1; then
+          apt_install_retry ca-certificates || apt-get install -y ca-certificates || true
+        fi
+        update-ca-certificates || true
+        log " - Installed registry CA into OS trust store ($os_ca_dst)"
+      else
+        log " - Registry CA already present in OS trust store ($os_ca_dst); skipping update"
+      fi
+
+      # Verify it was picked up
+      ls -l /etc/ssl/certs | grep -i registry || true
+    else
+      log " - WARNING: no registry CA cert available to add to OS trust store"
     fi
 
     # 31.3) Ensure Docker daemon.json has registry mirrors
