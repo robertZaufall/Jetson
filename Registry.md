@@ -268,6 +268,8 @@ Remark:
 Only `docker.io` images are cached by the proxy automatically.
 `nvcr.io` images for example have to be loaded using `registry.local:5002/nvidia/<image>:<tag>` and are then getting cached.  
 `ghcr.io` images have to be loaded using `registry.local:5003/<org-or-user>/<image>:<tag>` and are then getting cached.
+Example (use mirror instead of GHCR directly):  
+`docker pull registry.local:5003/nvidia-ai-iot/vllm:latest-jetson-thor`
 
 If you meant `hcr.io/...`: that is likely a typo for `ghcr.io/...` (GitHub Container Registry).
 
