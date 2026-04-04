@@ -3,9 +3,10 @@
 # Execution outline:
 # Preflight. Require root, parse flags, detect the target user/platform, and choose defaults.
 # 0. Set the German keyboard layout for the console, GNOME, and GDM.
-# 1. Install OpenSSH and the base configuration tools.
-# 1.1. Install the NVIDIA JetPack meta-package.
-# 1.2. Install Tailscale from the official apt repository.
+# 1. Install OpenSSH server.
+# 1.1. Install the base configuration tools.
+# 1.2. Install the NVIDIA JetPack meta-package.
+# 1.3. Install Tailscale from the official apt repository.
 # 2. Disable GNOME idle, lock, and suspend defaults system-wide.
 # 3. Apply no-idle/no-lock settings to the GDM greeter.
 # 4. Disable X11 DPMS and screen blanking at the Xorg level.
@@ -262,33 +263,50 @@ dconf update 2>/dev/null || true
 
 ######################################################################################
 
-log "1) Install OpenSSH + dconf tools"
+log "1) Install OpenSSH server"
 export DEBIAN_FRONTEND=noninteractive
-# Use resilient installer to tolerate transient DNS/network issues across L4T 36.4.4/38.2
-if ! apt_install_retry openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs; then
-  log " - WARNING: base tools not fully installed (offline?). Will continue."
-  # Best-effort fallback without failing the whole script
-  apt-get install -y openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs || true
+
+if is_pkg_installed openssh-server; then
+  log " - OpenSSH server already installed."
+else
+  # Use resilient installer to tolerate transient DNS/network issues across L4T 36.4.4/38.2
+  if ! apt_install_retry openssh-server; then
+    log " - WARNING: OpenSSH server could not be installed now (offline?). Will continue."
+    # Best-effort fallback without failing the whole script
+    apt-get install -y openssh-server || true
+  fi
 fi
-git lfs install --system || true
-systemctl enable --now ssh || true
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  if ! ufw status 2>/dev/null | grep -qE '(^|[[:space:]])OpenSSH([[:space:]]|$)'; then
-    ufw allow OpenSSH || true
+
+if is_pkg_installed openssh-server; then
+  systemctl enable --now ssh || true
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ! ufw status 2>/dev/null | grep -qE '(^|[[:space:]])OpenSSH([[:space:]]|$)'; then
+      ufw allow OpenSSH || true
+    fi
   fi
 fi
 
 ######################################################################################
 
-# 1) Install NVIDIA JetPack SDK meta-package
-log "1.1) Install NVIDIA JetPack SDK (nvidia-jetpack)"
+log "1.1) Install base configuration tools"
+if ! apt_install_retry dconf-cli libglib2.0-bin nano btop curl git-lfs; then
+  log " - WARNING: base tools not fully installed (offline?). Will continue."
+  # Best-effort fallback without failing the whole script
+  apt-get install -y dconf-cli libglib2.0-bin nano btop curl git-lfs || true
+fi
+git lfs install --system || true
+
+######################################################################################
+
+# 1.2) Install NVIDIA JetPack SDK meta-package
+log "1.2) Install NVIDIA JetPack SDK (nvidia-jetpack)"
 if ! apt_install_retry nvidia-jetpack; then
   log " - WARNING: could not install nvidia-jetpack now (repo/DNS?). Skipping."
 fi
 
 ######################################################################################
 
-log "1.2) Install Tailscale"
+log "1.3) Install Tailscale"
 if is_pkg_installed tailscale; then
   log " - Tailscale already installed; ensuring tailscaled is enabled."
   systemctl enable --now tailscaled || true
