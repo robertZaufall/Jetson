@@ -16,6 +16,7 @@ REG_IP=${REG_IP:-${REG:-}}
 GIT_USER=${GIT_USER:-}
 GIT_EMAIL=${GIT_EMAIL:-}
 JETSON_USER=${JETSON_USER:-jetson}
+APT_LOCK_TIMEOUT=${APT_LOCK_TIMEOUT:-900}
 
 usage() {
   echo "Usage: $0 [--user=NAME] [--reboot] [--mks] [--k3s] [--vnc-backend=x11vnc] [--vnc-password=PASS] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
@@ -63,6 +64,36 @@ step() {
 }
 
 # Small helpers
+apt_wait_for_locks() {
+  local elapsed=0 interval=10
+  local -a locks=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/cache/apt/archives/lock
+    /var/lib/apt/lists/lock
+  )
+
+  if ! command -v fuser >/dev/null 2>&1; then
+    return 0
+  fi
+
+  while fuser "${locks[@]}" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$APT_LOCK_TIMEOUT" ]; then
+      log " - ERROR: apt/dpkg lock still held after ${APT_LOCK_TIMEOUT}s."
+      fuser -v "${locks[@]}" 2>/dev/null || true
+      return 1
+    fi
+    log " - Waiting for apt/dpkg lock to be released (${elapsed}/${APT_LOCK_TIMEOUT}s)."
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+}
+
+apt_get_retry() {
+  apt_wait_for_locks || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" "$@"
+}
+
 apt_install_retry() {
   # Usage: apt_install_retry pkg1 [pkg2 ...]
   # Be resilient to transient DNS/network hiccups
@@ -79,9 +110,9 @@ apt_install_retry() {
     return 0
   fi
 
-  DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
+  apt_get_retry update -y -o Acquire::Retries=3 \
     -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "${missing_pkgs[@]}" || return 1
+  apt_get_retry install -y -o Acquire::Retries=3 "${missing_pkgs[@]}" || return 1
 }
 
 is_pkg_installed() {
@@ -116,9 +147,9 @@ install_tailscale_repo() {
   fi
 
   rm -f "$keyring_tmp" "$list_tmp"
-  DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Retries=3 \
+  apt_get_retry update -y -o Acquire::Retries=3 \
     -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 || return 1
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 tailscale || return 1
+  apt_get_retry install -y -o Acquire::Retries=3 tailscale || return 1
 }
 
 # Detect platform once. JetPack 7 covers both Thor and Orin, so hardware-specific
@@ -213,7 +244,7 @@ export DEBIAN_FRONTEND=noninteractive
 if ! apt_install_retry openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs; then
   log " - WARNING: base tools not fully installed (offline?). Will continue."
   # Best-effort fallback without failing the whole script
-  apt-get install -y openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs || true
+  apt_get_retry install -y openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs || true
 fi
 git lfs install --system || true
 systemctl enable --now ssh || true
@@ -992,7 +1023,7 @@ fi
 
 step "Install Docker Engine and plugins (if missing)"
 if ! command -v docker >/dev/null 2>&1; then
-  apt-get install -y ca-certificates curl gnupg
+  apt_get_retry install -y ca-certificates curl gnupg
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
@@ -1000,20 +1031,20 @@ if ! command -v docker >/dev/null 2>&1; then
 "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
 $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
 tee /etc/apt/sources.list.d/docker.list > /dev/null
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
+  apt_get_retry update -y
+  apt_get_retry install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
   systemctl enable --now docker || true
 else
   if is_pkg_installed docker.io; then
     log " - docker.io detected; skipping Docker CE package upgrade to avoid a package migration."
   elif is_pkg_installed docker-ce; then
     log " - Docker CE already installed; ensuring plugins present"
-    apt-get install -y docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras || true
+    apt_get_retry install -y docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras || true
 
     log " - Upgrading Docker Engine and plugins"
     # If running manually (non-root):
     # sudo apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
-    if ! apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; then
+    if ! apt_get_retry install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; then
       log " - WARNING: Docker CE upgrade failed; leaving the existing Docker install in place."
     fi
   else
@@ -1026,7 +1057,7 @@ fi
 step "Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
 if ! command -v python3 >/dev/null 2>&1; then
-  apt-get update -y && apt-get install -y python3 || true
+  apt_get_retry update -y && apt_get_retry install -y python3 || true
 fi
 NVIDIA_RUNTIME_AVAILABLE=0
 if command -v nvidia-container-runtime >/dev/null 2>&1; then
@@ -1119,8 +1150,8 @@ done
 
 if [ ${#TO_PURGE[@]} -gt 0 ]; then
   log " - Purging APT games: ${TO_PURGE[*]}"
-  apt-get purge -y "${TO_PURGE[@]}" || true
-  apt-get autoremove -y || true
+  apt_get_retry purge -y "${TO_PURGE[@]}" || true
+  apt_get_retry autoremove -y || true
 else
   log " - No listed APT games installed; skipping purge"
 fi
@@ -1199,7 +1230,7 @@ fi
 step "Clone jetson-containers and run install.sh (only if missing)"
 # Ensure git is available
 if ! command -v git >/dev/null 2>&1; then
-  apt-get install -y git
+  apt_get_retry install -y git
 fi
 
 TARGET_DIR="$HOME_DIR/git/jetson-containers"
@@ -1312,12 +1343,12 @@ if [ "${K3S}" -eq 1 ]; then
     log " - Helm already installed; skipping."
   else
     # Add official Helm apt repository and key (per helm.sh docs)
-    apt-get install -y apt-transport-https gnupg curl || true
+    apt_get_retry install -y apt-transport-https gnupg curl || true
     curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor | tee /usr/share/keyrings/helm.gpg >/dev/null
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" \
       > /etc/apt/sources.list.d/helm-stable-debian.list
-    apt-get update -y
-    apt-get install -y helm
+    apt_get_retry update -y
+    apt_get_retry install -y helm
   fi
 else
   log " - Skipping Helm install (requires --k3s)"
@@ -1326,7 +1357,7 @@ fi
 ######################################################################################
 
 step "Install guvcview"
-apt-get install -y guvcview
+apt_get_retry install -y guvcview
 
 ######################################################################################
 
@@ -1392,7 +1423,7 @@ if [ -n "${REG_IP:-}" ]; then
       if [ ! -f "$os_ca_dst" ] || ! cmp -s "$ca_src" "$os_ca_dst"; then
         install -m 0644 "$ca_src" "$os_ca_dst"
         if ! command -v update-ca-certificates >/dev/null 2>&1; then
-          apt_install_retry ca-certificates || apt-get install -y ca-certificates || true
+          apt_install_retry ca-certificates || apt_get_retry install -y ca-certificates || true
         fi
         update-ca-certificates || true
         log " - Installed registry CA into OS trust store ($os_ca_dst)"
@@ -1409,7 +1440,7 @@ if [ -n "${REG_IP:-}" ]; then
     # Ensure Docker daemon.json has registry mirrors.
     DAEMON_JSON=/etc/docker/daemon.json
     if ! command -v python3 >/dev/null 2>&1; then
-      apt-get update -y && apt-get install -y python3 || true
+      apt_get_retry update -y && apt_get_retry install -y python3 || true
     fi
     python3 - "$DAEMON_JSON" <<'PY'
 import json, os, sys
@@ -1496,8 +1527,8 @@ step "Install btop (system monitor)"
 if command -v btop >/dev/null 2>&1; then
   log " - btop already installed; skipping."
 else
-  apt-get update -y
-  apt-get install -y btop
+  apt_get_retry update -y
+  apt_get_retry install -y btop
 fi
 
 ######################################################################################
