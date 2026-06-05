@@ -101,8 +101,8 @@ if [[ ! -d "$JETPACK" ]]; then
 fi
 
 cd "$JETPACK"
-sudo ./apply_binaries.sh
 sudo ./tools/l4t_flash_prerequisites.sh
+sudo ./apply_binaries.sh
 sudo ./tools/l4t_create_default_user.sh -u "$USER_NAME" -p "$USER_PASSWORD" -a -n "$TARGET_HOSTNAME" --accept-license
 
 seed_wifi_profile() {
@@ -206,10 +206,22 @@ EOF
 }
 
 maybe_preinstall_ssh_server() {
-  local resolv_backup
+  local resolv_backup m idx
+  local -a mounted=()
+
+  cleanup_preinstall_ssh() {
+    for ((idx=${#mounted[@]} - 1; idx >= 0; idx--)); do
+      sudo umount -lf "$ROOTFS/${mounted[$idx]}" || true
+    done
+    sudo rm -f "$ROOTFS/etc/resolv.conf"
+    if [[ -e "$resolv_backup" || -L "$resolv_backup" ]]; then
+      sudo mv "$resolv_backup" "$ROOTFS/etc/resolv.conf"
+    fi
+  }
 
   if [[ -x /usr/bin/qemu-aarch64-static ]]; then
     resolv_backup="$ROOTFS/etc/resolv.conf.codex-bak"
+    trap cleanup_preinstall_ssh RETURN
     if [[ -e "$ROOTFS/etc/resolv.conf" || -L "$ROOTFS/etc/resolv.conf" ]]; then
       sudo rm -f "$resolv_backup"
       sudo mv "$ROOTFS/etc/resolv.conf" "$resolv_backup"
@@ -217,6 +229,7 @@ maybe_preinstall_ssh_server() {
     sudo cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
     for m in proc sys dev dev/pts; do
       sudo mount --bind "/$m" "$ROOTFS/$m"
+      mounted+=("$m")
     done
     sudo chroot "$ROOTFS" bash -c '
       set -e
@@ -229,13 +242,8 @@ maybe_preinstall_ssh_server() {
       systemctl enable ssh || true
       rm -f /etc/ssh/ssh_host_*
     ' || true
-    for m in dev/pts dev sys proc; do
-      sudo umount -lf "$ROOTFS/$m" || true
-    done
-    sudo rm -f "$ROOTFS/etc/resolv.conf"
-    if [[ -e "$resolv_backup" || -L "$resolv_backup" ]]; then
-      sudo mv "$resolv_backup" "$ROOTFS/etc/resolv.conf"
-    fi
+    trap - RETURN
+    cleanup_preinstall_ssh
   fi
 }
 
@@ -294,9 +302,19 @@ sudo touch "$ROOTFS/etc/skel/.config/gnome-initial-setup-done"
 maybe_chroot_config() {
   # Needs qemu-user-static + binfmt on the host
   if [[ -x /usr/bin/qemu-aarch64-static ]]; then
+    local m idx
+    local -a mounted=()
+    cleanup_chroot_config() {
+      for ((idx=${#mounted[@]} - 1; idx >= 0; idx--)); do
+        sudo umount -lf "$ROOTFS/${mounted[$idx]}" || true
+      done
+    }
+    trap cleanup_chroot_config RETURN
+
     # Bind mounts for dpkg/update-initramfs
     for m in proc sys dev dev/pts; do
       sudo mount --bind "/$m" "$ROOTFS/$m"
+      mounted+=("$m")
     done
     sudo chroot "$ROOTFS" /usr/bin/dconf update || true
     sudo chroot "$ROOTFS" bash -c '
@@ -307,10 +325,8 @@ maybe_chroot_config() {
       DEBIAN_FRONTEND=noninteractive dpkg-reconfigure keyboard-configuration || true
       update-initramfs -u || true
     ' || true
-    # Clean up mounts
-    for m in dev/pts dev sys proc; do
-      sudo umount -lf "$ROOTFS/$m" || true
-    done
+    trap - RETURN
+    cleanup_chroot_config
   fi
 }
 maybe_chroot_config
@@ -358,9 +374,10 @@ fi
 
 # Full flash to NVMe rootfs + QSPI (put device in Force-Recovery for first-time QSPI)
 cd "$JETPACK"
-sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
-  --external-device nvme0n1p1 \
-  -c tools/kernel_flash/flash_l4t_t234_nvme.xml \
-  -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
-  --showlogs --network usb0 --erase-all \
+FLASH_SCRIPT="./l4t_initrd_flash.sh"
+if [[ ! -x "$FLASH_SCRIPT" ]]; then
+  FLASH_SCRIPT="./tools/kernel_flash/l4t_initrd_flash.sh"
+fi
+sudo "$FLASH_SCRIPT" \
+  --showlogs --erase-all \
   jetson-orin-nano-devkit-super internal

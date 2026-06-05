@@ -11,19 +11,14 @@
 
 set -euo pipefail
 
-# Require root
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-  echo "ERROR: this script must be run as root (use sudo)." >&2
-  exit 1
-fi
-
 REBOOT=${REBOOT:-0}
 REG_IP=${REG_IP:-${REG:-}}
 GIT_USER=${GIT_USER:-}
 GIT_EMAIL=${GIT_EMAIL:-}
+JETSON_USER=${JETSON_USER:-jetson}
 
 usage() {
-  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=x11vnc] [--vnc-password=PASS] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
+  echo "Usage: $0 [--user=NAME] [--reboot] [--mks] [--k3s] [--vnc-backend=x11vnc] [--vnc-password=PASS] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
 }
 
 for arg in "$@"; do
@@ -33,6 +28,7 @@ for arg in "$@"; do
     --vnc-backend=*) VNC_BACKEND="${arg#*=}" ; VNC_BACKEND_SET=1 ;;
     --vnc-no-encryption|--vnc-insecure) : ;; # Accepted for compatibility; x11vnc does not use this setting.
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
+    --user=*|--username=*|--target-user=*) JETSON_USER="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
     SSH_KEY_PATH=*|--ssh-key-path=*) SSH_KEY_PATH="${arg#*=}" ;;
@@ -43,8 +39,19 @@ for arg in "$@"; do
     REG=*) REG_IP="${arg#*=}" ;;
     --reg=*) REG_IP="${arg#*=}" ;;
     --help|-h) usage; exit 0 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      usage
+      exit 1
+      ;;
   esac
 done
+
+# Require root
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  echo "ERROR: this script must be run as root (use sudo)." >&2
+  exit 1
+fi
 
 log() {
   printf '\n=== %s ===\n' "$*"
@@ -155,7 +162,7 @@ fi
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
 
-USERNAME="jetson"
+USERNAME="$JETSON_USER"
 USER_ENTRY=$(getent passwd "$USERNAME" || true)
 [ -n "$USER_ENTRY" ] || { echo "ERROR: required user '$USERNAME' does not exist." >&2; exit 1; }
 HOME_DIR=$(printf '%s\n' "$USER_ENTRY" | cut -d: -f6)
@@ -606,6 +613,7 @@ if [ -n "${VNC_PASSWORD:-}" ]; then
 
   apt_install_retry x11vnc || true
 
+  if command -v x11vnc >/dev/null 2>&1; then
   # Determine VNC password: use --vnc-password, else existing seed, else existing system pass, else generate.
   VNC_PASS8="${VNC_PASSWORD:-}"
   if [ -z "$VNC_PASS8" ] && [ -s "$HOME_DIR/.config/gnome-remote-desktop.vncpass" ]; then
@@ -788,6 +796,9 @@ EOF
     if ! ufw status 2>/dev/null | grep -q '5900/tcp'; then
       ufw allow 5900/tcp || true
     fi
+  fi
+  else
+    log " - WARNING: x11vnc is not installed; skipping VNC password, wrapper, service, and firewall setup."
   fi
 else
   step "VNC: no changes (run with --vnc-password=... to modify VNC settings)"
