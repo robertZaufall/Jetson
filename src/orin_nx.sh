@@ -28,7 +28,8 @@ normalize_locale() {
 normalize_locale
 
 usage() {
-  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS]" >&2
+  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS] [--board=BOARD]" >&2
+  echo "Default board: jetson-orin-nano-devkit (covers Orin NX SKUs in JetPack 7.x)" >&2
 }
 
 if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
@@ -46,6 +47,7 @@ USER_PASSWORD="$2"
 TARGET_HOSTNAME="$3"
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PSK="${WIFI_PSK:-${WIFI_PASSWORD:-}}"
+ORIN_NX_BOARD="${ORIN_NX_BOARD:-jetson-orin-nano-devkit}"
 shift 3
 
 for arg in "$@"; do
@@ -55,6 +57,9 @@ for arg in "$@"; do
       ;;
     --wifi-psk=*|--wifi-password=*)
       WIFI_PSK="${arg#*=}"
+      ;;
+    --board=*|--orin-nx-board=*)
+      ORIN_NX_BOARD="${arg#*=}"
       ;;
     -h|--help)
       usage
@@ -403,8 +408,9 @@ FLASH_SCRIPT="./l4t_initrd_flash.sh"
 if [[ ! -x "$FLASH_SCRIPT" ]]; then
   FLASH_SCRIPT="./tools/kernel_flash/l4t_initrd_flash.sh"
 fi
+echo "Flashing Jetson Orin NX with board config: $ORIN_NX_BOARD"
 sudo "$FLASH_SCRIPT" \
   --showlogs --erase-all \
-  jetson-orin-nano-devkit-super internal
+  "$ORIN_NX_BOARD" internal
 echo "Flash command completed successfully."
 exit 0
