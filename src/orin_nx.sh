@@ -6,13 +6,14 @@
 # 3. Apply NVIDIA binaries and run flash prerequisites in the JetPack workspace.
 # 4. Pre-create the default user account and hostname in the target image.
 # 5. Optionally inject a Wi-Fi profile into the target rootfs.
-# 6. Preinstall and enable the SSH server for the target, with a first-boot fallback.
-# 7. Preseed a German keyboard layout for the system, GNOME, and GDM in the target rootfs.
-# 8. Keep the target locale non-German so only the keyboard layout changes.
-# 9. Suppress GNOME's first-login welcome flow in the target image.
-# 10. Optionally enter the rootfs with qemu-user-static to compile dconf defaults and refresh keyboard settings.
-# 11. Seed a `clone.sh` helper into `/etc/skel` and the default user's home directory.
-# 12. Flash the Jetson Orin NX image with `l4t_initrd_flash.sh`.
+# 6. Patch Intel 8265 Wi-Fi support into the Orin NX rootfs before flashing.
+# 7. Preinstall and enable the SSH server for the target, with a first-boot fallback.
+# 8. Preseed a German keyboard layout for the system, GNOME, and GDM in the target rootfs.
+# 9. Keep the target locale non-German so only the keyboard layout changes.
+# 10. Suppress GNOME's first-login welcome flow in the target image.
+# 11. Optionally enter the rootfs with qemu-user-static to compile dconf defaults and refresh keyboard settings.
+# 12. Seed a `clone.sh` helper into `/etc/skel` and the default user's home directory.
+# 13. Flash the Jetson Orin NX image with `l4t_initrd_flash.sh`.
 
 set -euo pipefail
 
@@ -27,9 +28,12 @@ normalize_locale() {
 
 normalize_locale
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAHBOOM_WIFI_ASSET_ROOT="$SCRIPT_DIR/assets/yahboom_orin_nx_wifi"
+
 usage() {
-  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS] [--board=BOARD]" >&2
-  echo "Default board: jetson-orin-nano-devkit (covers Orin NX SKUs in JetPack 7.x)" >&2
+  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS] [--board=BOARD] [--skip-intel-wifi-fix]" >&2
+  echo "Default board: jetson-orin-nano-devkit-super" >&2
 }
 
 if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
@@ -47,7 +51,8 @@ USER_PASSWORD="$2"
 TARGET_HOSTNAME="$3"
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PSK="${WIFI_PSK:-${WIFI_PASSWORD:-}}"
-ORIN_NX_BOARD="${ORIN_NX_BOARD:-jetson-orin-nano-devkit}"
+ORIN_NX_BOARD="${ORIN_NX_BOARD:-jetson-orin-nano-devkit-super}"
+ORIN_NX_INTEL_WIFI_FIX="${ORIN_NX_INTEL_WIFI_FIX:-1}"
 shift 3
 
 for arg in "$@"; do
@@ -60,6 +65,9 @@ for arg in "$@"; do
       ;;
     --board=*|--orin-nx-board=*)
       ORIN_NX_BOARD="${arg#*=}"
+      ;;
+    --skip-intel-wifi-fix)
+      ORIN_NX_INTEL_WIFI_FIX=0
       ;;
     -h|--help)
       usage
@@ -168,6 +176,219 @@ EOF
 if [[ "$WIFI_PROFILE_ENABLED" -eq 1 ]]; then
   seed_wifi_profile "$WIFI_SSID" "$WIFI_PSK"
 fi
+
+patch_yahboom_orin_nx_intel_wifi() {
+  local kernel_version asset_dir modules_dir firmware_dir target_modules_dir target_firmware_dir candidate asset_vermagic
+  local -a modules firmware
+
+  if [[ "$ORIN_NX_INTEL_WIFI_FIX" != "1" ]]; then
+    echo "Skipping Yahboom Orin NX Intel 8265 Wi-Fi rootfs patch."
+    return
+  fi
+
+  if [[ ! -d "$YAHBOOM_WIFI_ASSET_ROOT" ]]; then
+    echo "Yahboom Orin NX Wi-Fi asset directory not found: $YAHBOOM_WIFI_ASSET_ROOT" >&2
+    echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+    return
+  fi
+
+  kernel_version=""
+  while IFS= read -r candidate; do
+    if [[ -d "$YAHBOOM_WIFI_ASSET_ROOT/$candidate" ]]; then
+      kernel_version="$candidate"
+      break
+    fi
+  done < <(find "$ROOTFS/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r)
+
+  if [[ -z "$kernel_version" ]]; then
+    echo "No cached Yahboom Orin NX Wi-Fi asset matches the target rootfs kernel." >&2
+    echo "Available target kernels:" >&2
+    find "$ROOTFS/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | sort >&2 || true
+    echo "Available cached assets:" >&2
+    find "$YAHBOOM_WIFI_ASSET_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | sort >&2 || true
+    echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+    return
+  fi
+
+  asset_dir="$YAHBOOM_WIFI_ASSET_ROOT/$kernel_version"
+  modules_dir="$asset_dir/modules"
+  firmware_dir="$asset_dir/firmware"
+  target_modules_dir="$ROOTFS/lib/modules/$kernel_version/updates/dkms"
+  target_firmware_dir="$ROOTFS/etc/firmware"
+  modules=(iwlwifi-compat.ko iwlwifi.ko iwlxvt.ko iwlmvm.ko mac80211.ko cfg80211.ko)
+  firmware=(iwlwifi-8265-36.ucode iwlwifi-8265-34.ucode)
+
+  for candidate in "${modules[@]}"; do
+    if [[ ! -f "$modules_dir/$candidate" ]]; then
+      echo "Missing cached Wi-Fi module asset: $modules_dir/$candidate" >&2
+      echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+      return
+    fi
+  done
+  for candidate in "${firmware[@]}"; do
+    if [[ ! -f "$firmware_dir/$candidate" ]]; then
+      echo "Missing cached Wi-Fi firmware asset: $firmware_dir/$candidate" >&2
+      echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+      return
+    fi
+  done
+  if ! command -v modinfo >/dev/null 2>&1; then
+    echo "modinfo is required on the flash host to validate cached Wi-Fi modules." >&2
+    echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+    return
+  fi
+  for candidate in "${modules[@]}"; do
+    asset_vermagic="$(modinfo -F vermagic "$modules_dir/$candidate" 2>/dev/null || true)"
+    if [[ "$asset_vermagic" != "$kernel_version "* ]]; then
+      echo "Cached Wi-Fi module does not match the target rootfs kernel: $modules_dir/$candidate" >&2
+      echo "  target kernel: $kernel_version" >&2
+      echo "  module vermagic: ${asset_vermagic:-unknown}" >&2
+      echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+      return
+    fi
+  done
+  if [[ -f "$asset_dir/SHA256SUMS" ]]; then
+    if ! (cd "$asset_dir" && sha256sum -c SHA256SUMS); then
+      echo "Cached Wi-Fi asset checksum validation failed." >&2
+      echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+      return
+    fi
+  fi
+  if ! command -v depmod >/dev/null 2>&1; then
+    echo "depmod is required on the flash host to patch the Orin NX rootfs." >&2
+    echo "Continuing without pre-flash Wi-Fi module patch; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing." >&2
+    return
+  fi
+
+  echo "Patching Yahboom Orin NX Intel 8265 Wi-Fi assets for kernel $kernel_version"
+  sudo install -d "$target_modules_dir" "$target_firmware_dir"
+  for candidate in "${modules[@]}"; do
+    sudo install -m 0644 "$modules_dir/$candidate" "$target_modules_dir/$candidate"
+  done
+  for candidate in "${firmware[@]}"; do
+    sudo install -m 0644 "$firmware_dir/$candidate" "$target_firmware_dir/$candidate"
+  done
+  if ! sudo depmod -b "$ROOTFS" "$kernel_version"; then
+    echo "depmod failed for the patched Orin NX rootfs." >&2
+    echo "Continuing with flash; run ~/yahboom-orin-nx-wifi-fix.sh on the target after flashing if Wi-Fi is missing." >&2
+    return
+  fi
+}
+
+patch_yahboom_orin_nx_intel_wifi
+
+seed_yahboom_orin_nx_wifi_fix_script() {
+  local script_name script_path skel_path user_script_path uid_gid
+
+  script_name="yahboom-orin-nx-wifi-fix.sh"
+  script_path="$ROOTFS/usr/local/sbin/$script_name"
+  skel_path="$ROOTFS/etc/skel/$script_name"
+  user_script_path="$USER_HOME_DIR/$script_name"
+
+  sudo install -d "$ROOTFS/usr/local/sbin" "$ROOTFS/etc/skel"
+  sudo tee "$script_path" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unset LANGUAGE
+unset LC_ADDRESS LC_COLLATE LC_CTYPE LC_IDENTIFICATION LC_MEASUREMENT
+unset LC_MESSAGES LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER
+unset LC_TELEPHONE LC_TIME
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
+if [[ "${EUID}" -eq 0 ]]; then
+  SUDO=()
+else
+  SUDO=(sudo)
+fi
+
+kernel_version="$(uname -r)"
+echo "Target kernel: $kernel_version"
+
+if ! lspci -nn 2>/dev/null | grep -qi '8086:24fd'; then
+  echo "Warning: Intel 8265 / 8275 PCI device [8086:24fd] was not detected." >&2
+fi
+
+if [[ ! -e "/lib/modules/$kernel_version/build/Makefile" ]]; then
+  echo "Kernel headers for $kernel_version are missing." >&2
+  echo "Install the matching linux-headers package before running this script." >&2
+  exit 1
+fi
+
+"${SUDO[@]}" apt-get update
+"${SUDO[@]}" apt-get install -y backport-iwlwifi-dkms dkms build-essential linux-firmware zstd pciutils
+
+dkms_src_dir="$(find /usr/src -maxdepth 1 -type d -name 'backport-iwlwifi-*' | sort -V | tail -n 1)"
+if [[ -z "$dkms_src_dir" ]]; then
+  echo "backport-iwlwifi DKMS source directory was not found under /usr/src." >&2
+  exit 1
+fi
+
+dkms_version="$(basename "$dkms_src_dir" | sed 's/^backport-iwlwifi-//')"
+if [[ -z "$dkms_version" ]]; then
+  echo "Could not determine backport-iwlwifi DKMS version from $dkms_src_dir." >&2
+  exit 1
+fi
+
+if [[ ! -f "$dkms_src_dir/dkms.conf.orig" ]]; then
+  "${SUDO[@]}" cp -a "$dkms_src_dir/dkms.conf" "$dkms_src_dir/dkms.conf.orig"
+fi
+"${SUDO[@]}" sed -i '/^BUILD_EXCLUSIVE_CONFIG=/d;/^OBSOLETE_BY=/d' "$dkms_src_dir/dkms.conf"
+
+"${SUDO[@]}" dkms remove -m backport-iwlwifi -v "$dkms_version" --all || true
+"${SUDO[@]}" dkms add -m backport-iwlwifi -v "$dkms_version"
+"${SUDO[@]}" dkms build -m backport-iwlwifi -v "$dkms_version" -k "$kernel_version"
+"${SUDO[@]}" dkms install -m backport-iwlwifi -v "$dkms_version" -k "$kernel_version"
+"${SUDO[@]}" depmod -a "$kernel_version"
+
+"${SUDO[@]}" install -d /etc/firmware
+for version in 36 34; do
+  firmware_name="iwlwifi-8265-$version.ucode"
+  compressed_path="/lib/firmware/$firmware_name.zst"
+  plain_path="/lib/firmware/$firmware_name"
+  tmp_path="$(mktemp)"
+
+  if [[ -f "$compressed_path" ]]; then
+    zstd -dc "$compressed_path" >"$tmp_path"
+  elif [[ -f "$plain_path" ]]; then
+    cp "$plain_path" "$tmp_path"
+  else
+    rm -f "$tmp_path"
+    echo "Missing firmware source for $firmware_name" >&2
+    exit 1
+  fi
+
+  "${SUDO[@]}" install -m 0644 "$tmp_path" "/etc/firmware/$firmware_name"
+  rm -f "$tmp_path"
+done
+
+echo "Intel Wi-Fi modules and firmware are installed."
+echo "Reboot before final verification so the DKMS cfg80211/mac80211 stack loads cleanly."
+echo
+echo "After reboot, verify with:"
+echo "  dkms status"
+echo "  lspci -k -nn | grep -A4 -Ei 'network controller|8086|24fd'"
+echo "  nmcli dev"
+EOF
+  sudo chmod 755 "$script_path"
+  sudo install -m 0755 "$script_path" "$skel_path"
+
+  if [[ -d "$USER_HOME_DIR" ]]; then
+    sudo install -m 0755 "$script_path" "$user_script_path"
+    uid_gid=""
+    if [[ -f "$ROOTFS/etc/passwd" ]]; then
+      uid_gid="$(awk -F: -v u="$USER_NAME" '$1==u{print $3 ":" $4}' "$ROOTFS/etc/passwd" || true)"
+    fi
+    if [[ -n "${uid_gid:-}" ]]; then
+      sudo chown "$uid_gid" "$user_script_path" || true
+    else
+      sudo chown 1000:1000 "$user_script_path" || true
+    fi
+  fi
+}
+
+seed_yahboom_orin_nx_wifi_fix_script
 
 seed_first_boot_ssh_service() {
   local script_path service_path wants_path
