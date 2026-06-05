@@ -16,6 +16,17 @@
 
 set -euo pipefail
 
+normalize_locale() {
+  unset LANGUAGE
+  unset LC_ADDRESS LC_COLLATE LC_CTYPE LC_IDENTIFICATION LC_MEASUREMENT
+  unset LC_MESSAGES LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER
+  unset LC_TELEPHONE LC_TIME
+  export LANG=C.UTF-8
+  export LC_ALL=C.UTF-8
+}
+
+normalize_locale
+
 usage() {
   echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS] [--board=jetson-agx-thor-devkit|jetson-agx-thor-t4000] [--ext-num-sectors=SECTORS]" >&2
 }
@@ -121,7 +132,6 @@ fi
 cd "$JETPACK"
 sudo ./tools/l4t_flash_prerequisites.sh
 sudo ./apply_binaries.sh --openrm
-#LC_ALL=C.UTF-8 LANG=C.UTF-8 sudo ./tools/l4t_create_default_user.sh -u "$USER_NAME" -p "$USER_PASSWORD" -a -n "$TARGET_HOSTNAME" --accept-license
 sudo ./tools/l4t_create_default_user.sh -u "$USER_NAME" -p "$USER_PASSWORD" -a -n "$TARGET_HOSTNAME" --accept-license
 
 seed_wifi_profile() {
@@ -183,6 +193,13 @@ seed_first_boot_ssh_service() {
   sudo tee "$script_path" >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+unset LANGUAGE
+unset LC_ADDRESS LC_COLLATE LC_CTYPE LC_IDENTIFICATION LC_MEASUREMENT
+unset LC_MESSAGES LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER
+unset LC_TELEPHONE LC_TIME
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 
 done_marker="/var/lib/jetson-firstboot/ssh-ready"
 install -d "$(dirname "$done_marker")"
@@ -250,8 +267,11 @@ maybe_preinstall_ssh_server() {
       sudo mount --bind "/$m" "$ROOTFS/$m"
       mounted+=("$m")
     done
-    sudo chroot "$ROOTFS" bash -c '
+    sudo env -u LANGUAGE LANG=C.UTF-8 LC_ALL=C.UTF-8 chroot "$ROOTFS" bash -c '
       set -e
+      unset LC_ADDRESS LC_COLLATE LC_CTYPE LC_IDENTIFICATION LC_MEASUREMENT
+      unset LC_MESSAGES LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER
+      unset LC_TELEPHONE LC_TIME
       status="$(dpkg-query -W -f='"'"'${Status}'"'"' openssh-server 2>/dev/null || true)"
       if ! printf "%s" "$status" | grep -q "install ok installed"; then
         export DEBIAN_FRONTEND=noninteractive
@@ -281,6 +301,7 @@ BACKSPACE="guess"
 EOF
 sudo tee "$ROOTFS/etc/default/locale" >/dev/null <<'EOF'
 LANG=C.UTF-8
+LC_ALL=C.UTF-8
 EOF
 
 # 2) GNOME default input source for new users/login screen (can be changed later)
@@ -335,9 +356,12 @@ maybe_chroot_config() {
       sudo mount --bind "/$m" "$ROOTFS/$m"
       mounted+=("$m")
     done
-    sudo chroot "$ROOTFS" /usr/bin/dconf update || true
-    sudo chroot "$ROOTFS" bash -c '
+    sudo env -u LANGUAGE LANG=C.UTF-8 LC_ALL=C.UTF-8 chroot "$ROOTFS" /usr/bin/dconf update || true
+    sudo env -u LANGUAGE LANG=C.UTF-8 LC_ALL=C.UTF-8 chroot "$ROOTFS" bash -c '
       set -e
+      unset LC_ADDRESS LC_COLLATE LC_CTYPE LC_IDENTIFICATION LC_MEASUREMENT
+      unset LC_MESSAGES LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER
+      unset LC_TELEPHONE LC_TIME
       echo "keyboard-configuration keyboard-configuration/layoutcode string de" | debconf-set-selections
       echo "keyboard-configuration keyboard-configuration/variantcode string nodeadkeys" | debconf-set-selections
       echo "keyboard-configuration keyboard-configuration/modelcode string pc105" | debconf-set-selections
@@ -404,3 +428,5 @@ if [[ -n "$EXT_NUM_SECTORS" ]]; then
 else
   sudo "$FLASH_SCRIPT" "${FLASH_ARGS[@]}"
 fi
+echo "Flash command completed successfully."
+exit 0
