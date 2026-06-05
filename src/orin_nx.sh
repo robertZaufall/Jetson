@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
+
+# Steps:
+# 1. Validate the required default user, password, and hostname arguments.
+# 2. Resolve the JetPack 7.2 Orin NX `Linux_for_Tegra` directory and target rootfs.
+# 3. Apply NVIDIA binaries and run flash prerequisites in the JetPack workspace.
+# 4. Pre-create the default user account and hostname in the target image.
+# 5. Optionally inject a Wi-Fi profile into the target rootfs.
+# 6. Preinstall and enable the SSH server for the target, with a first-boot fallback.
+# 7. Preseed a German keyboard layout for the system, GNOME, and GDM in the target rootfs.
+# 8. Keep the target locale non-German so only the keyboard layout changes.
+# 9. Suppress GNOME's first-login welcome flow in the target image.
+# 10. Optionally enter the rootfs with qemu-user-static to compile dconf defaults and refresh keyboard settings.
+# 11. Seed a `clone.sh` helper into `/etc/skel` and the default user's home directory.
+# 12. Flash the Jetson Orin NX image with `l4t_initrd_flash.sh`.
+
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname>" >&2
+  echo "Usage: $0 <default-user-name> <default-user-password> <default-hostname> [--wifi-ssid=SSID] [--wifi-psk=PASS]" >&2
 }
 
 if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
@@ -18,30 +33,125 @@ fi
 USER_NAME="$1"
 USER_PASSWORD="$2"
 TARGET_HOSTNAME="$3"
-JETPACK_TARGET="JETSON_ORIN_NX"
+WIFI_SSID="${WIFI_SSID:-}"
+WIFI_PSK="${WIFI_PSK:-${WIFI_PASSWORD:-}}"
+shift 3
 
-resolve_jetpack_dir() {
-  local jetpack_pattern matches=()
+for arg in "$@"; do
+  case "$arg" in
+    --wifi-ssid=*)
+      WIFI_SSID="${arg#*=}"
+      ;;
+    --wifi-psk=*|--wifi-password=*)
+      WIFI_PSK="${arg#*=}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
 
-  jetpack_pattern="$HOME/nvidia/nvidia_sdk/JetPack_6.*_Linux_${JETPACK_TARGET}_TARGETS/Linux_for_Tegra"
-  mapfile -t matches < <(compgen -G "$jetpack_pattern" | sort -V)
-
-  if [[ "${#matches[@]}" -eq 0 ]]; then
-    echo "Could not find a JetPack 6 Linux_for_Tegra directory matching: $jetpack_pattern" >&2
-    exit 1
+detect_host_wifi_ssid() {
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | awk -F: '$1=="yes"{print substr($0,5); exit}'
+    return
   fi
-
-  printf '%s\n' "${matches[${#matches[@]}-1]}"
+  if command -v iwgetid >/dev/null 2>&1; then
+    iwgetid -r 2>/dev/null || true
+  fi
 }
 
-JETPACK="$(resolve_jetpack_dir)"
+escape_nm_value() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//$'\n'/\\n}
+  printf '%s' "$value"
+}
+
+WIFI_PROFILE_ENABLED=0
+if [[ -n "$WIFI_PSK" ]]; then
+  if [[ -z "$WIFI_SSID" ]]; then
+    WIFI_SSID="$(detect_host_wifi_ssid)"
+  fi
+  if [[ -z "$WIFI_SSID" ]]; then
+    echo "Wi-Fi password was provided, but no SSID was given and no active host Wi-Fi SSID could be detected." >&2
+    echo "Pass --wifi-ssid=SSID explicitly." >&2
+    exit 1
+  fi
+  WIFI_PROFILE_ENABLED=1
+elif [[ -n "$WIFI_SSID" ]]; then
+  echo "Wi-Fi SSID was provided without a password. Pass --wifi-psk=PASS as well." >&2
+  exit 1
+fi
+
+JETPACK_VERSION="${JETPACK_VERSION:-7.2}"
+export JETPACK="${JETPACK:-$HOME/nvidia/nvidia_sdk/JetPack_${JETPACK_VERSION}_Linux_JETSON_ORIN_NX_TARGETS/Linux_for_Tegra}"
 ROOTFS="$JETPACK/rootfs"
 USER_HOME_DIR="$ROOTFS/home/$USER_NAME"
+
+if [[ ! -d "$JETPACK" ]]; then
+  echo "Jetson Orin NX Linux_for_Tegra directory not found: $JETPACK" >&2
+  exit 1
+fi
 
 cd "$JETPACK"
 sudo ./apply_binaries.sh
 sudo ./tools/l4t_flash_prerequisites.sh
 sudo ./tools/l4t_create_default_user.sh -u "$USER_NAME" -p "$USER_PASSWORD" -a -n "$TARGET_HOSTNAME" --accept-license
+
+seed_wifi_profile() {
+  local ssid="$1"
+  local psk="$2"
+  local safe_name conn_id conn_uuid conn_file
+
+  safe_name="$(printf '%s' "$ssid" | tr -cs '[:alnum:]._-' '_')"
+  safe_name="${safe_name#_}"
+  safe_name="${safe_name%_}"
+  [[ -n "$safe_name" ]] || safe_name="preseeded-wifi"
+
+  conn_id="wifi-${safe_name}"
+  conn_uuid="$(cat /proc/sys/kernel/random/uuid)"
+  conn_file="$ROOTFS/etc/NetworkManager/system-connections/${conn_id}.nmconnection"
+
+  sudo install -d -m 0700 "$ROOTFS/etc/NetworkManager/system-connections"
+  sudo tee "$conn_file" >/dev/null <<EOF
+[connection]
+id=$conn_id
+uuid=$conn_uuid
+type=wifi
+autoconnect=true
+autoconnect-priority=100
+
+[wifi]
+mode=infrastructure
+ssid=$(escape_nm_value "$ssid")
+
+[wifi-security]
+auth-alg=open
+key-mgmt=wpa-psk
+psk=$(escape_nm_value "$psk")
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=stable-privacy
+method=auto
+
+[proxy]
+EOF
+  sudo chmod 600 "$conn_file"
+}
+
+if [[ "$WIFI_PROFILE_ENABLED" -eq 1 ]]; then
+  seed_wifi_profile "$WIFI_SSID" "$WIFI_PSK"
+fi
 
 seed_first_boot_ssh_service() {
   local script_path service_path wants_path
@@ -132,7 +242,8 @@ maybe_preinstall_ssh_server() {
 seed_first_boot_ssh_service
 maybe_preinstall_ssh_server
 
-# Keep the flashed system in English while preserving the German keyboard layout.
+# --- set German keyboard system-wide in the target rootfs ---
+# 1) System keyboard (affects TTY + GDM login)
 sudo install -d "$ROOTFS/etc/default"
 sudo tee "$ROOTFS/etc/default/keyboard" >/dev/null <<'EOF'
 XKBMODEL="pc105"
@@ -145,6 +256,7 @@ sudo tee "$ROOTFS/etc/default/locale" >/dev/null <<'EOF'
 LANG=C.UTF-8
 EOF
 
+# 2) GNOME default input source for new users/login screen (can be changed later)
 sudo install -d "$ROOTFS/etc/dconf/db/local.d" "$ROOTFS/etc/dconf/profile"
 sudo tee "$ROOTFS/etc/dconf/profile/user" >/dev/null <<'EOF'
 user-db:user
@@ -155,10 +267,10 @@ sudo tee "$ROOTFS/etc/dconf/db/local.d/00-keyboard" >/dev/null <<'EOF'
 sources=[('xkb', 'de+nodeadkeys')]
 EOF
 
+# 2b) Disable GNOME's first-login welcome flow in the flashed image.
 disable_autostart_desktop_entry() {
   local desktop_path="$1"
   local desktop_name="$2"
-
   sudo tee "$desktop_path" >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
@@ -178,8 +290,11 @@ disable_autostart_desktop_entry \
   "GNOME Initial Setup Copy Worker"
 sudo touch "$ROOTFS/etc/skel/.config/gnome-initial-setup-done"
 
+# 3) Try to compile dconf defaults + refresh keyboard inside the rootfs (optional)
 maybe_chroot_config() {
+  # Needs qemu-user-static + binfmt on the host
   if [[ -x /usr/bin/qemu-aarch64-static ]]; then
+    # Bind mounts for dpkg/update-initramfs
     for m in proc sys dev dev/pts; do
       sudo mount --bind "/$m" "$ROOTFS/$m"
     done
@@ -192,13 +307,17 @@ maybe_chroot_config() {
       DEBIAN_FRONTEND=noninteractive dpkg-reconfigure keyboard-configuration || true
       update-initramfs -u || true
     ' || true
+    # Clean up mounts
     for m in dev/pts dev sys proc; do
       sudo umount -lf "$ROOTFS/$m" || true
     done
   fi
 }
 maybe_chroot_config
+# --- end keyboard preset ---
 
+
+# ---------- Home script on target (NOT Desktop) ----------
 HOME_SCRIPT_NAME="clone.sh"
 HOME_SCRIPT_CONTENT='#!/usr/bin/env bash
 set -euo pipefail
@@ -211,22 +330,23 @@ cd Jetson/src
 chmod +x start.sh
 '
 
+# Seed for future users
 SKEL_DIR="$ROOTFS/etc/skel"
 sudo install -d "$SKEL_DIR"
 echo "$HOME_SCRIPT_CONTENT" | sudo tee "$SKEL_DIR/$HOME_SCRIPT_NAME" >/dev/null
 sudo chmod +x "$SKEL_DIR/$HOME_SCRIPT_NAME"
 
+# Write into the actual default user's home if it already exists
 if [[ -d "$USER_HOME_DIR" ]]; then
   sudo install -d "$USER_HOME_DIR/.config"
   echo "$HOME_SCRIPT_CONTENT" | sudo tee "$USER_HOME_DIR/$HOME_SCRIPT_NAME" >/dev/null
   sudo chmod +x "$USER_HOME_DIR/$HOME_SCRIPT_NAME"
   sudo touch "$USER_HOME_DIR/.config/gnome-initial-setup-done"
-
+  # chown using UID:GID from target rootfs if available, else fall back to 1000:1000
   UID_GID=""
   if [[ -f "$ROOTFS/etc/passwd" ]]; then
     UID_GID="$(awk -F: -v u="$USER_NAME" '$1==u{print $3 ":" $4}' "$ROOTFS/etc/passwd" || true)"
   fi
-
   if [[ -n "${UID_GID:-}" ]]; then
     sudo chown "$UID_GID" "$USER_HOME_DIR/.config" "$USER_HOME_DIR/.config/gnome-initial-setup-done" "$USER_HOME_DIR/$HOME_SCRIPT_NAME" || true
   else
@@ -234,11 +354,13 @@ if [[ -d "$USER_HOME_DIR" ]]; then
   fi
 fi
 
+# ---------- Final reminder before flashing ----------
+
+# Full flash to NVMe rootfs + QSPI (put device in Force-Recovery for first-time QSPI)
 cd "$JETPACK"
-# NVIDIA's Super Mode flow uses the nano devkit super flash config for Orin NX as well.
 sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
   --external-device nvme0n1p1 \
   -c tools/kernel_flash/flash_l4t_t234_nvme.xml \
   -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
-  --showlogs --network usb0 \
+  --showlogs --network usb0 --erase-all \
   jetson-orin-nano-devkit-super internal

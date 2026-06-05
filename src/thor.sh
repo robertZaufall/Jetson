@@ -2,7 +2,7 @@
 
 # Steps:
 # 1. Validate the required default user, password, and hostname arguments.
-# 2. Resolve the latest JetPack 7 AGX Thor `Linux_for_Tegra` directory and target rootfs.
+# 2. Resolve the JetPack 7.2 AGX Thor `Linux_for_Tegra` directory and target rootfs.
 # 3. Apply NVIDIA binaries and run flash prerequisites in the JetPack workspace.
 # 4. Pre-create the default user account and hostname in the target image.
 # 5. Optionally inject a Wi-Fi profile into the target rootfs.
@@ -90,10 +90,15 @@ elif [[ -n "$WIFI_SSID" ]]; then
   exit 1
 fi
 
-#export JETPACK="$HOME/nvidia/nvidia_sdk/JetPack_7.0_Linux_JETSON_AGX_THOR_TARGETS/Linux_for_Tegra"
-export JETPACK="$(ls -d "$HOME"/nvidia/nvidia_sdk/JetPack_7.*_Linux_JETSON_AGX_THOR_TARGETS/Linux_for_Tegra | tail -n1)"
+JETPACK_VERSION="${JETPACK_VERSION:-7.2}"
+export JETPACK="${JETPACK:-$HOME/nvidia/nvidia_sdk/JetPack_${JETPACK_VERSION}_Linux_JETSON_AGX_THOR_TARGETS/Linux_for_Tegra}"
 ROOTFS="$JETPACK/rootfs"
 USER_HOME_DIR="$ROOTFS/home/$USER_NAME"
+
+if [[ ! -d "$JETPACK" ]]; then
+  echo "Jetson AGX Thor Linux_for_Tegra directory not found: $JETPACK" >&2
+  exit 1
+fi
 
 cd "$JETPACK"
 sudo ./apply_binaries.sh --openrm

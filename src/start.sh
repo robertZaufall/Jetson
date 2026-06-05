@@ -2,44 +2,11 @@
 
 # Execution outline:
 # Preflight. Require root, parse flags, detect the target user/platform, and choose defaults.
-# 0. Set the German keyboard layout for the console, GNOME, and GDM.
-# 1. Install OpenSSH server.
-# 1.1. Install the base configuration tools.
-# 1.2. Install the NVIDIA JetPack meta-package.
-# 1.3. Install Tailscale from the official apt repository.
-# 2. Disable GNOME idle, lock, and suspend defaults system-wide.
-# 3. Apply no-idle/no-lock settings to the GDM greeter.
-# 4. Disable X11 DPMS and screen blanking at the Xorg level.
-# 5. Add X11/GNOME session fallbacks that keep the display awake and unlocked.
-# 6. Mask systemd sleep and hibernate targets.
-# 7. Configure logind to ignore lid and suspend keys.
-# 8. Disable virtual console blanking.
-# 9. Disable Wi-Fi powersave in NetworkManager.
-# 10. Optionally install an SSH authorized key and force key-only login.
-# 11. Enable GDM auto-login for the target user.
-# 12. Seed an unencrypted GNOME keyring to suppress prompts.
-# 13. Optionally configure VNC with the provided password, using the X11/x11vnc path.
-# 14. Optionally rename the device hostname.
-# 15. Disable `nvzramconfig`.
-# 16. Run `fix_jetson_stats.py` to install and patch `jetson-stats` / `jtop`.
-# 17. Configure the swapfile size, or remove swap on Thor.
-# 18. Repair Git and Git LFS permissions under the user's home directory.
-# 19. Set the Jetson power mode.
-# 20. Install or upgrade Docker Engine and its plugins.
-# 21. Configure Docker to use the NVIDIA runtime by default.
-# 22. Add the user to the `docker` group.
-# 23. Reserved snapd pin/hold logic (currently disabled).
-# 24. Remove preinstalled games and related packages.
-# 25. Optionally install MicroK8s.
-# 26. Clone `jetson-containers` and run `install.sh` if it is missing.
-# 27. Optionally install K3s and its host prerequisites.
-# 28. Optionally install Helm when K3s is enabled.
-# 29. Install `guvcview`.
-# 30. Reserved desktop cleanup step (currently disabled).
-# 31. Optionally configure the local registry host mapping, certificates, and Docker mirrors.
-# 32. Install NVM, Node LTS, and the OpenAI Codex CLI.
-# 33. Optionally configure the global Git identity.
-# 34. Ensure `btop` is installed.
+# Runtime steps are numbered automatically by `step()` so this outline stays stable when steps move.
+# - Configure keyboard, desktop no-idle policy, SSH, auto-login, keyring, and optional VNC.
+# - Apply Jetson-specific platform setup: JetPack packages, jtop, swap, power mode, Docker/NVIDIA runtime.
+# - Install optional Kubernetes tooling and developer tools.
+# - Apply optional registry, hostname, SSH key, and Git identity settings.
 # Final. Reboot if requested; otherwise print reboot guidance.
 
 set -euo pipefail
@@ -56,7 +23,7 @@ GIT_USER=${GIT_USER:-}
 GIT_EMAIL=${GIT_EMAIL:-}
 
 usage() {
-  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=grd|x11vnc] [--vnc-password=PASS] [--vnc-no-encryption] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
+  echo "Usage: $0 [--reboot] [--mks] [--k3s] [--vnc-backend=x11vnc] [--vnc-password=PASS] [--hostname=NAME] [--swap-size=SIZE] [SSH_KEY_PATH=PATH|--ssh-key-path=PATH] [REG=REGISTRY_IP|--reg=REGISTRY_IP] [--git-user=NAME --git-email=EMAIL]"
 }
 
 for arg in "$@"; do
@@ -64,7 +31,7 @@ for arg in "$@"; do
     --reboot|-r) REBOOT=1 ;;
     --no-reboot) REBOOT=0 ;;
     --vnc-backend=*) VNC_BACKEND="${arg#*=}" ; VNC_BACKEND_SET=1 ;;
-    --vnc-no-encryption|--vnc-insecure) VNC_NO_ENCRYPTION=1 ; VNC_ENCRYPTION_EXPLICIT=1 ;;
+    --vnc-no-encryption|--vnc-insecure) : ;; # Accepted for compatibility; x11vnc does not use this setting.
     --vnc-password=*|--vnc-pass=*) VNC_PASSWORD="${arg#*=}" ;;
     --hostname=*|--set-hostname=*) NEW_HOSTNAME="${arg#*=}" ;;
     --swap-size=*) SWAP_SIZE="${arg#*=}" ;;
@@ -79,7 +46,14 @@ for arg in "$@"; do
   esac
 done
 
-log(){ printf '\n=== %s ===\n' "$*"; }
+log() {
+  printf '\n=== %s ===\n' "$*"
+}
+STEP=0
+step() {
+  STEP=$((STEP + 1))
+  log "$STEP) $*"
+}
 
 # Small helpers
 apt_install_retry() {
@@ -140,48 +114,35 @@ install_tailscale_repo() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 tailscale || return 1
 }
 
-# Detect L4T version (e.g., 36.4.4 or 38.2.0) -> L4T_MAJOR/L4T_MINOR
+# Detect platform once. JetPack 7 covers both Thor and Orin, so hardware-specific
+# behavior must key off the device model rather than the L4T major version.
 detect_l4t() {
-  local ver
-  if ver=$(dpkg-query -W -f='${Version}\n' nvidia-l4t-core 2>/dev/null | head -n1); then
-    :
-  elif [ -f /etc/nv_tegra_release ]; then
-    # Format: # R36 (release), REVISION: 4.4, GCID: ...
-    ver=$(awk -F'[ ,:]+' '/^# R[0-9]+/ {gsub("R","",$2); gsub("REVISION","",$4); print $2"."$5}' /etc/nv_tegra_release 2>/dev/null || true)
+  local ver pkgver
+  if pkgver=$(dpkg-query -W -f='${Version}' nvidia-l4t-core 2>/dev/null); then
+    ver=$(printf '%s\n' "$pkgver" | sed -n 's/\b\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)
+  elif [ -r /etc/nv_tegra_release ]; then
+    ver=$(sed -n "s/.*R\([0-9][0-9]*\) *\.* *REVISION *\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2.\3/p" /etc/nv_tegra_release | head -n1)
   fi
-  echo "$ver"
+  printf '%s' "${ver:-unknown}"
 }
 
-L4T_VERSION_RAW="$(detect_l4t)"
-L4T_MAJOR=0; L4T_MINOR=0
-if [ -n "$L4T_VERSION_RAW" ]; then
-  L4T_MAJOR=$(printf '%s' "$L4T_VERSION_RAW" | sed -n 's/^\([0-9]\+\)\..*/\1/p')
-  L4T_MINOR=$(printf '%s' "$L4T_VERSION_RAW" | sed -n 's/^[0-9]\+\.\([0-9]\+\).*/\1/p')
-fi
+L4T_VERSION="$(detect_l4t)"
+. /etc/os-release 2>/dev/null || true
+UBUNTU_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-unknown}}
+MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+IS_THOR=0
+echo "$MODEL" | grep -Eiq 'Thor' && IS_THOR=1
+IS_ORIN_NX_OR_NANO=0
+echo "$MODEL" | grep -Eiq 'Orin[[:space:]-]*(NX|Nano)' && IS_ORIN_NX_OR_NANO=1
 
-have_user_bus() {
-  # Args: uid
-  local uid="$1"; local bus="/run/user/${uid}/bus"
-  [ -S "$bus" ] || return 1
-  XDG_RUNTIME_DIR="/run/user/${uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
-    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
-    --method org.freedesktop.DBus.ListNames >/dev/null 2>&1
-}
-
-gsettings_has_key() {
-  # Args: schema key
-  local schema="$1" key="$2"
-  gsettings list-keys "$schema" 2>/dev/null | grep -qx "$key"
-}
 VNC_BACKEND_SET=${VNC_BACKEND_SET:-0}
-# Default to X11-only VNC (x11vnc). Wayland/GRD not used for VNC.
+# Default to X11-only VNC (x11vnc). Wayland/GRD is intentionally not used for VNC.
 if [ "${VNC_BACKEND_SET}" -eq 0 ]; then
   VNC_BACKEND="x11vnc"
 fi
 VNC_BACKEND=${VNC_BACKEND:-x11vnc}
-VNC_NO_ENCRYPTION=${VNC_NO_ENCRYPTION:-0}
 # Auto-default swap size to 8G (8GB RAM) or 16G (16GB RAM) when not set
-log "Target L4T: ${L4T_MAJOR}.${L4T_MINOR} (raw: ${L4T_VERSION_RAW:-unknown}); VNC backend: ${VNC_BACKEND}"
+log "Platform: L4T ${L4T_VERSION:-unknown} on Ubuntu ${UBUNTU_CODENAME}; model: ${MODEL:-unknown}; VNC backend: ${VNC_BACKEND}"
 
 if [ -z "${SWAP_SIZE:-}" ]; then
   mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
@@ -194,40 +155,16 @@ fi
 MICROK8S=${MICROK8S:-0}
 K3S=${K3S:-0}
 
-VNC_ENCRYPTION_EXPLICIT=${VNC_ENCRYPTION_EXPLICIT:-0}
-# Only adjust VNC encryption defaults when a password is supplied on this run.
-# When the script runs without --vnc-password, leave all existing VNC settings untouched.
-if [ -n "${VNC_PASSWORD:-}" ] && [ "${VNC_BACKEND}" = "grd" ] && [ "${VNC_ENCRYPTION_EXPLICIT}" -eq 0 ]; then
-  VNC_NO_ENCRYPTION=1
-fi
-
 USERNAME="jetson"
 USER_ENTRY=$(getent passwd "$USERNAME" || true)
 [ -n "$USER_ENTRY" ] || { echo "ERROR: required user '$USERNAME' does not exist." >&2; exit 1; }
 HOME_DIR=$(printf '%s\n' "$USER_ENTRY" | cut -d: -f6)
 log "Target user: $USERNAME ($HOME_DIR)"
 
-# Detect platform (L4T and device) for cross-version behavior (Orin NX/Nano 36.4.4, Thor 38.2)
-detect_l4t() {
-  local ver pkgver
-  if pkgver=$(dpkg-query -W -f='${Version}' nvidia-l4t-core 2>/dev/null); then
-    # Extract X.Y.Z
-    ver=$(printf '%s\n' "$pkgver" | sed -n 's/\b\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)
-  elif [ -r /etc/nv_tegra_release ]; then
-    # Fallback parse from nv_tegra_release
-    ver=$(sed -n "s/.*R\([0-9][0-9]*\) *\.* *REVISION *\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2.\3/p" /etc/nv_tegra_release | head -n1)
-  fi
-  printf '%s' "${ver:-unknown}"
-}
-L4T_VERSION=$(detect_l4t)
-. /etc/os-release 2>/dev/null || true
-UBUNTU_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-unknown}}
-log "Platform: L4T ${L4T_VERSION:-unknown} on Ubuntu ${UBUNTU_CODENAME}"
-
 ######################################################################################
 
-# 0) Configure German keyboard layout (system-wide + GNOME + GDM)
-log "0) Set German keyboard layout (system + GNOME + GDM)"
+# Configure German keyboard layout (system-wide + GNOME + GDM)
+step "Set German keyboard layout (system + GNOME + GDM)"
 # Console + X11 defaults
 localectl set-keymap de 2>/dev/null || true
 localectl set-x11-keymap de 2>/dev/null || true
@@ -263,50 +200,33 @@ dconf update 2>/dev/null || true
 
 ######################################################################################
 
-log "1) Install OpenSSH server"
+step "Install OpenSSH + dconf tools"
 export DEBIAN_FRONTEND=noninteractive
-
-if is_pkg_installed openssh-server; then
-  log " - OpenSSH server already installed."
-else
-  # Use resilient installer to tolerate transient DNS/network issues across L4T 36.4.4/38.2
-  if ! apt_install_retry openssh-server; then
-    log " - WARNING: OpenSSH server could not be installed now (offline?). Will continue."
-    # Best-effort fallback without failing the whole script
-    apt-get install -y openssh-server || true
-  fi
-fi
-
-if is_pkg_installed openssh-server; then
-  systemctl enable --now ssh || true
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if ! ufw status 2>/dev/null | grep -qE '(^|[[:space:]])OpenSSH([[:space:]]|$)'; then
-      ufw allow OpenSSH || true
-    fi
-  fi
-fi
-
-######################################################################################
-
-log "1.1) Install base configuration tools"
-if ! apt_install_retry dconf-cli libglib2.0-bin nano btop curl git-lfs; then
+# Use resilient installer to tolerate transient DNS/network issues.
+if ! apt_install_retry openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs; then
   log " - WARNING: base tools not fully installed (offline?). Will continue."
   # Best-effort fallback without failing the whole script
-  apt-get install -y dconf-cli libglib2.0-bin nano btop curl git-lfs || true
+  apt-get install -y openssh-server dconf-cli libglib2.0-bin nano btop curl git-lfs || true
 fi
 git lfs install --system || true
+systemctl enable --now ssh || true
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ! ufw status 2>/dev/null | grep -qE '(^|[[:space:]])OpenSSH([[:space:]]|$)'; then
+    ufw allow OpenSSH || true
+  fi
+fi
 
 ######################################################################################
 
-# 1.2) Install NVIDIA JetPack SDK meta-package
-log "1.2) Install NVIDIA JetPack SDK (nvidia-jetpack)"
+# Install NVIDIA JetPack SDK meta-package
+step "Install NVIDIA JetPack SDK (nvidia-jetpack)"
 if ! apt_install_retry nvidia-jetpack; then
   log " - WARNING: could not install nvidia-jetpack now (repo/DNS?). Skipping."
 fi
 
 ######################################################################################
 
-log "1.3) Install Tailscale"
+step "Install Tailscale"
 if is_pkg_installed tailscale; then
   log " - Tailscale already installed; ensuring tailscaled is enabled."
   systemctl enable --now tailscaled || true
@@ -329,7 +249,7 @@ fi
 
 ######################################################################################
 
-log "2) GNOME system-wide: disable idle/lock/suspend (dconf)"
+step "GNOME system-wide: disable idle/lock/suspend (dconf)"
 # Ensure the dconf user profile reads system 'local' DB (required for defaults to apply)
 install -d -m 0755 /etc/dconf/profile
 if [ ! -f /etc/dconf/profile/user ] || ! grep -Pq '^\s*user-db:user' /etc/dconf/profile/user || ! grep -Pq '^\s*system-db:local' /etc/dconf/profile/user; then
@@ -377,7 +297,7 @@ dconf update || true
 
 ######################################################################################
 
-log "3) GDM greeter: prevent idle/suspend"
+step "GDM greeter: prevent idle/suspend"
 install -d -m 0755 /etc/dconf/profile
 cat >/etc/dconf/profile/gdm <<'EOF'
 user-db:user
@@ -407,7 +327,7 @@ dconf update || true
 
 ######################################################################################
 
-log "4) X11 PERMANENT: disable DPMS & blanking at the Xorg level"
+step "X11 permanent: disable DPMS & blanking at the Xorg level"
 install -d -m 0755 /etc/X11/xorg.conf.d
 cat >/etc/X11/xorg.conf.d/10-extensions.conf <<'EOF'
 Section "Extensions"
@@ -425,7 +345,7 @@ EOF
 
 ######################################################################################
 
-log "5) X11 PERMANENT: user-session fallback to enforce no-blank via xset"
+step "X11 permanent: user-session fallback to enforce no-blank via xset"
 cat >/usr/local/bin/disable-dpms-x11 <<'EOF'
 #!/bin/sh
 # Run only for X11 sessions
@@ -503,12 +423,12 @@ EOF
 
 ######################################################################################
 
-log "6) Block suspend/hibernate at systemd level"
+step "Block suspend/hibernate at systemd level"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target || true
 
 ######################################################################################
 
-log "7) systemd-logind: ignore lid/suspend keys"
+step "systemd-logind: ignore lid/suspend keys"
 conf=/etc/systemd/logind.conf
 touch "$conf"
 sed -i \
@@ -523,7 +443,7 @@ systemctl restart systemd-logind || true
 
 ######################################################################################
 
-log "8) Disable TTY (virtual console) blanking"
+step "Disable TTY (virtual console) blanking"
 cat >/etc/systemd/system/disable-console-blanking.service <<'EOF'
 [Unit]
 Description=Disable TTY console blanking
@@ -541,7 +461,7 @@ systemctl enable --now disable-console-blanking.service || true
 
 ######################################################################################
 
-log "9) Disable Wi-Fi powersave (NetworkManager)"
+step "Disable Wi-Fi powersave (NetworkManager)"
 install -d -m 0755 /etc/NetworkManager/conf.d
 cat >/etc/NetworkManager/conf.d/00-wifi-powersave-off.conf <<'EOF'
 [connection]
@@ -553,7 +473,7 @@ fi
 
 ######################################################################################
 
-log "10) Optional: key-only SSH (if SSH_KEY_PATH provided)"
+step "Optional: key-only SSH (if SSH_KEY_PATH provided)"
 if [ "${SSH_KEY_PATH:-}" != "" ] && [ -f "${SSH_KEY_PATH}" ]; then
   AUTH_DIR="$HOME_DIR/.ssh"; AUTH_FILE="$AUTH_DIR/authorized_keys"
   install -d -m 0700 -o "$USERNAME" -g "$USERNAME" "$AUTH_DIR"
@@ -574,7 +494,7 @@ fi
 
 ######################################################################################
 
-log "11) Enable GDM auto-login for user: $USERNAME"
+step "Enable GDM auto-login for user: $USERNAME"
 GDM_CONF="/etc/gdm3/custom.conf"
 install -d -m 0755 /etc/gdm3
 touch "$GDM_CONF"
@@ -587,7 +507,7 @@ BEGIN{in_d=0; se=0; su=0}
   if (in_d){
     if ($0 ~ /^[#[:space:]]*AutomaticLoginEnable[[:space:]]*=/){print "AutomaticLoginEnable=true"; se=1; next}
     if ($0 ~ /^[#[:space:]]*AutomaticLogin[[:space:]]*=/){print "AutomaticLogin=" user; su=1; next}
-    # Intentionally leave any existing WaylandEnable= line unchanged to avoid breaking GNOME Remote Desktop VNC
+    # WaylandEnable is handled only when the x11vnc setup below is requested.
   }
   print
 }
@@ -596,7 +516,7 @@ END{ if(in_d){ if(!se) print "AutomaticLoginEnable=true"; if(!su) print "Automat
 
 ######################################################################################
 
-log "12) Create default UNENCRYPTED GNOME keyring (no UI prompts)"
+step "Create default unencrypted GNOME keyring (no UI prompts)"
 KEYRINGS_DIR="$HOME_DIR/.local/share/keyrings"
 mkdir -p "$KEYRINGS_DIR"
 
@@ -649,275 +569,74 @@ EOF
 ######################################################################################
 
 if [ -n "${VNC_PASSWORD:-}" ]; then
-  log "13) VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
+  step "VNC / Remote Desktop server setup (backend: ${VNC_BACKEND})"
   USER_UID=$(id -u "$USERNAME")
   USER_ENV=("XDG_RUNTIME_DIR=/run/user/${USER_UID}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus")
-  USER_BUS="/run/user/${USER_UID}/bus"
-  TIMEOUT="timeout 10s"
   sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
 
-    # Force X11-only VNC regardless of requested backend
-    if [ "${VNC_BACKEND}" != "x11vnc" ]; then
-      log " - Forcing VNC backend to x11vnc (Xorg only); ignoring Wayland/GRD for VNC."
-      VNC_BACKEND="x11vnc"
-    fi
+  # Force X11-only VNC regardless of requested backend.
+  if [ "${VNC_BACKEND}" != "x11vnc" ]; then
+    log " - Forcing VNC backend to x11vnc (Xorg only); ignoring requested backend."
+    VNC_BACKEND="x11vnc"
+  fi
 
-  if false; then  # GRD-based VNC path disabled (Wayland removed for VNC)
-    # --- GNOME Remote Desktop (VNC) ---
-    # Install required tools with retries; tolerate offline installs gracefully
-    if ! apt_install_retry gnome-remote-desktop libsecret-tools; then
-      log " - WARNING: could not install libsecret-tools/gnome-remote-desktop (temporary network/DNS issue?)."
-      log "           Continuing without them; will finalize on next online GUI login."
-    fi
-    # Detect early if GRD provides VNC (controls whether we force Wayland)
-    GRD_VNC_AVAILABLE=0
-    if command -v grdctl >/dev/null 2>&1; then
-      if $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --help 2>/dev/null | grep -qiE '^\s*vnc\b'; then
-        GRD_VNC_AVAILABLE=1
-      fi
-    fi
-
-    # On L4T 38.x+, enforce Wayland for GNOME Remote Desktop VNC only if VNC is available
-    if [ "$L4T_MAJOR" -ge 38 ] && [ "$GRD_VNC_AVAILABLE" -eq 1 ]; then
-      GDM_CONF="/etc/gdm3/custom.conf"
-      if [ -f "$GDM_CONF" ]; then
-        if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
-          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=true/' "$GDM_CONF" || true
-        else
-          # Make sure the [daemon] section exists and append the setting
-          grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
-          printf 'WaylandEnable=true\n' >> "$GDM_CONF"
-        fi
-        log " - Enabled Wayland in GDM (WaylandEnable=true) for GNOME Remote Desktop VNC. Log out/in (or reboot) to apply."
-      fi
-
-      # Also ensure the user's session selects a Wayland session (avoid Xorg fallback)
-      # Prefer explicit 'ubuntu-wayland' if present, else 'ubuntu', else 'gnome'
-      WAYLAND_SESSION=""
-      if [ -f /usr/share/wayland-sessions/ubuntu-wayland.desktop ]; then WAYLAND_SESSION=ubuntu-wayland; fi
-      if [ -z "$WAYLAND_SESSION" ] && [ -f /usr/share/wayland-sessions/ubuntu.desktop ]; then WAYLAND_SESSION=ubuntu; fi
-      if [ -z "$WAYLAND_SESSION" ] && [ -f /usr/share/wayland-sessions/gnome.desktop ]; then WAYLAND_SESSION=gnome; fi
-      if [ -n "$WAYLAND_SESSION" ]; then
-        ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
-        install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
-        touch "$ACCOUNTS_USER_FILE"
-        if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
-          # Remove any XSession= (Xorg) lines and set Session=<wayland-session>
-          sed -i -E '/^XSession=/d' "$ACCOUNTS_USER_FILE" || true
-          if grep -q '^Session=' "$ACCOUNTS_USER_FILE"; then
-            sed -i -E "s/^Session=.*/Session=${WAYLAND_SESSION}/" "$ACCOUNTS_USER_FILE" || true
-          else
-            printf 'Session=%s\n' "$WAYLAND_SESSION" >> "$ACCOUNTS_USER_FILE"
-          fi
-        else
-          printf '[User]\nSession=%s\n' "$WAYLAND_SESSION" > "$ACCOUNTS_USER_FILE"
-        fi
-        log " - AccountsService: set Session=${WAYLAND_SESSION} for user $USERNAME (Wayland)"
-      fi
-    fi
-    # Prepare passwords
-    VNC_PASS8="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)"
-    [ -n "$VNC_PASS8" ] || VNC_PASS8="${VNC_PASSWORD:0:8}"
-    RDP_PASS="$(printf '%s' "$VNC_PASSWORD" | LC_ALL=C tr -cd '[:print:]')"
-
-    DEFER_GRD=0
-
-    # Reconfirm VNC availability (in case help changed after package install)
-    GRD_VNC_AVAILABLE=$GRD_VNC_AVAILABLE
-
-    # If there is no user D-Bus session yet OR the user session bus is not responding OR
-    # gnome-remote-desktop is not active, defer setup to the next GUI login to avoid blocking here.
-    if ! have_user_bus "$USER_UID" || \
-       ! sudo -u "$USERNAME" systemctl --user is-active --quiet gnome-remote-desktop.service 2>/dev/null; then
-      log " - No ready user D-Bus/GRD session; deferring GNOME Remote Desktop setup to first GUI login."
-      # Persist the password for the helper
-      sudo -u "$USERNAME" install -d -m 0700 "$HOME_DIR/.config" || true
-      sudo -u "$USERNAME" bash -lc 'umask 177; printf "%s\n" '""$VNC_PASS8""' > "$HOME/.config/gnome-remote-desktop.vncpass"'
-
-      DEFER_GRD=1
-
-      # Create an autostart helper that seeds the password and restarts g-r-d on login
-      sudo -u "$USERNAME" install -d -m 0755 "$HOME_DIR/.local/bin" "$HOME_DIR/.config/autostart"
-      sudo -u "$USERNAME" tee "$HOME_DIR/.local/bin/grd-ensure-vnc-pass.sh" >/dev/null <<'EOSH'
-#!/bin/sh
-set -e
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
-PASS_FILE="$HOME/.config/gnome-remote-desktop.vncpass"
-[ -s "$PASS_FILE" ] || exit 0
-PASS=$(head -n1 "$PASS_FILE")
-[ -n "$PASS" ] || exit 0
-# Store secret then configure
-printf "%s" "$PASS" | secret-tool store --label "GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-grdctl vnc set-auth-method password || true
-grdctl vnc disable-view-only || true
-grdctl vnc enable || true
-if gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption; then
-  gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
-fi
-if grdctl --help 2>&1 | grep -q -- '--headless'; then printf "%s" "$PASS" | grdctl --headless vnc set-password || true; else grdctl vnc set-password "$PASS" || true; fi
-systemctl --user enable --now gnome-remote-desktop.service || true
-systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-EOSH
-      sudo -u "$USERNAME" chmod 700 "$HOME_DIR/.local/bin/grd-ensure-vnc-pass.sh"
-
-      sudo -u "$USERNAME" tee "$HOME_DIR/.config/autostart/grd-ensure-vnc-pass.desktop" >/dev/null <<'EODSK'
-[Desktop Entry]
-Type=Application
-Name=Ensure VNC password (GNOME Remote Desktop)
-Exec=/bin/sh -lc "$HOME/.local/bin/grd-ensure-vnc-pass.sh"
-X-GNOME-Autostart-enabled=true
-EODSK
-      # Also drop through to create the systemd user override and helper service below; they will activate on login
-    fi
-
-    if [ "$DEFER_GRD" -eq 0 ]; then
-    if command -v grdctl >/dev/null 2>&1; then
-      if [ "$GRD_VNC_AVAILABLE" -eq 1 ]; then
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc enable || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-auth-method password || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc disable-view-only || true
-      # Set VNC password: GNOME 42 (Jammy) expects an argument; newer versions accept stdin with --headless
-      if sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --help 2>&1 | grep -q -- '--headless'; then
-        # Newer grdctl
-        printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl --headless vnc set-password || true
-      else
-        # Jammy GNOME 42 path: pass the password as an argument
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl vnc set-password "$VNC_PASS8" || true
-      fi
-      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption'; then
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
-      fi
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" grdctl status || true
-      else
-        log " - GNOME Remote Desktop VNC not available. Falling back to legacy x11vnc on Xorg."
-        # Prefer Xorg session for reliability with x11vnc
-        ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
-        install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
-        touch "$ACCOUNTS_USER_FILE"
-        XORG_SESSION=""
-        if [ -f /usr/share/xsessions/ubuntu-xorg.desktop ]; then XORG_SESSION=ubuntu-xorg; fi
-        if [ -z "$XORG_SESSION" ] && [ -f /usr/share/xsessions/ubuntu.desktop ]; then XORG_SESSION=ubuntu; fi
-        if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
-          sed -i -E '/^(Session|XSession)=/d' "$ACCOUNTS_USER_FILE" || true
-          printf 'XSession=%s\n' "${XORG_SESSION:-ubuntu}" >> "$ACCOUNTS_USER_FILE"
-        else
-          printf '[User]\nXSession=%s\n' "${XORG_SESSION:-ubuntu}" > "$ACCOUNTS_USER_FILE"
-        fi
-        # Force Xorg in GDM (disable Wayland)
-        if [ -f /etc/gdm3/custom.conf ]; then
-          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=false/' /etc/gdm3/custom.conf || true
-        fi
-
-        # Install and configure x11vnc
-        apt_install_retry x11vnc || true
-        x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
-        chmod 600 /etc/x11vnc.pass 2>/dev/null || true
-        chown root:root /etc/x11vnc.pass 2>/dev/null || true
-        printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
-        chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
-      AUTH_FILE="/run/user/${USER_UID}/gdm/Xauthority"; [ -f "$AUTH_FILE" ] || AUTH_FILE="$HOME_DIR/.Xauthority"
-      cat >/etc/systemd/system/x11vnc.service <<EOF
-[Unit]
-Description=Legacy VNC server for X11 (x11vnc)
-Requires=display-manager.service
-After=display-manager.service graphical.target
-
-[Service]
-Type=simple
-Environment=DISPLAY=:0
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 120); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; done; exit 1'
-ExecStart=/usr/bin/x11vnc -display :0 -auth "$AUTH_FILE" -forever -loop -noxdamage -repeat -rfbauth /etc/x11vnc.pass -rfbport 5900 -shared -o /var/log/x11vnc.log
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=graphical.target
-EOF
-        systemctl daemon-reload
-        systemctl enable --now x11vnc.service || true
-        # Disable GRD services to avoid conflicts/confusion
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-        # Open firewall for VNC (guard against duplicates)
-        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-          if ! ufw status 2>/dev/null | grep -q '5900/tcp'; then
-            ufw allow 5900/tcp || true
-          fi
-        fi
-      fi
+  # --- X11-only VNC backend (x11vnc, shares X11 :0) ---
+  # Ensure system uses Xorg for the login/user session.
+  GDM_CONF="/etc/gdm3/custom.conf"
+  if [ -f "$GDM_CONF" ]; then
+    if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
+      sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=false/' "$GDM_CONF" || true
     else
-      # Fallback to gsettings + secret-tool
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc view-only false || true
-      if [ "${VNC_NO_ENCRYPTION}" -eq 1 ] && $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" bash -lc 'gsettings list-keys org.gnome.desktop.remote-desktop.vnc 2>/dev/null | grep -qx encryption'; then
-        $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" gsettings set org.gnome.desktop.remote-desktop.vnc encryption "['none']" || true
-      fi
-      printf '%s' "$VNC_PASS8" | $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" secret-tool store --label="GNOME Remote Desktop VNC password" xdg:schema org.gnome.RemoteDesktop.VncPassword || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop.service || true
-      $TIMEOUT sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user enable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+      grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
+      printf 'WaylandEnable=false\n' >> "$GDM_CONF"
     fi
+  fi
+  ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
+  install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
+  touch "$ACCOUNTS_USER_FILE"
+  XORG_SESSION=""
+  if [ -f /usr/share/xsessions/ubuntu-xorg.desktop ]; then XORG_SESSION=ubuntu-xorg; fi
+  if [ -z "$XORG_SESSION" ] && [ -f /usr/share/xsessions/ubuntu.desktop ]; then XORG_SESSION=ubuntu; fi
+  if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
+    sed -i -E '/^(Session|XSession)=/d' "$ACCOUNTS_USER_FILE" || true
+    printf 'XSession=%s\n' "${XORG_SESSION:-ubuntu}" >> "$ACCOUNTS_USER_FILE"
+  else
+    printf '[User]\nXSession=%s\n' "${XORG_SESSION:-ubuntu}" > "$ACCOUNTS_USER_FILE"
+  fi
 
+  apt_install_retry x11vnc || true
+
+  # Determine VNC password: use --vnc-password, else existing seed, else existing system pass, else generate.
+  VNC_PASS8="${VNC_PASSWORD:-}"
+  if [ -z "$VNC_PASS8" ] && [ -s "$HOME_DIR/.config/gnome-remote-desktop.vncpass" ]; then
+    VNC_PASS8=$(head -n1 "$HOME_DIR/.config/gnome-remote-desktop.vncpass")
+  fi
+  if [ -n "$VNC_PASS8" ]; then
+    VNC_PASS8=$(printf '%s' "$VNC_PASS8" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)
+  fi
+  if [ -z "$VNC_PASS8" ] && [ -f /etc/x11vnc.pass ]; then
+    : # leave existing password file in place
+  else
+    if [ -z "$VNC_PASS8" ]; then
+      VNC_PASS8=$(head -c 16 /dev/urandom | tr -cd 'A-Za-z0-9' | cut -c1-8)
+      log " - Generated VNC password: ${VNC_PASS8} (stored to /etc/x11vnc.pass)"
+      echo "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt"; chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" || true
     fi
+    # Store the VNC password hash deterministically (avoid stdin/verify pitfalls).
+    x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
+    # Record the effective 8-char VNC password for reference (insecure; stored in user config).
+    printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+    chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
+  fi
+  if [ -f /etc/x11vnc.pass ]; then
+    chmod 600 /etc/x11vnc.pass
+    chown root:root /etc/x11vnc.pass
+  else
+    log " - WARNING: /etc/x11vnc.pass was not created; x11vnc may not be installed/configured."
+  fi
 
-    # GRD-only setup removed for VNC
-
-    else
-      # --- X11-only VNC backend (x11vnc, shares X11 :0) ---
-      # Ensure system uses Xorg for the login/user session
-      GDM_CONF="/etc/gdm3/custom.conf"
-      if [ -f "$GDM_CONF" ]; then
-        if grep -qE '^[#[:space:]]*WaylandEnable[[:space:]]*=' "$GDM_CONF"; then
-          sed -i -E 's/^[#[:space:]]*WaylandEnable[[:space:]]*=.*/WaylandEnable=false/' "$GDM_CONF" || true
-        else
-          grep -q '^\[daemon\]' "$GDM_CONF" || printf '\n[daemon]\n' >> "$GDM_CONF"
-          printf 'WaylandEnable=false\n' >> "$GDM_CONF"
-        fi
-      fi
-      ACCOUNTS_USER_FILE="/var/lib/AccountsService/users/$USERNAME"
-      install -d -m 0755 /var/lib/AccountsService/users 2>/dev/null || true
-      touch "$ACCOUNTS_USER_FILE"
-      XORG_SESSION=""
-      if [ -f /usr/share/xsessions/ubuntu-xorg.desktop ]; then XORG_SESSION=ubuntu-xorg; fi
-      if [ -z "$XORG_SESSION" ] && [ -f /usr/share/xsessions/ubuntu.desktop ]; then XORG_SESSION=ubuntu; fi
-      if grep -q '^\[User\]' "$ACCOUNTS_USER_FILE"; then
-        sed -i -E '/^(Session|XSession)=/d' "$ACCOUNTS_USER_FILE" || true
-        printf 'XSession=%s\n' "${XORG_SESSION:-ubuntu}" >> "$ACCOUNTS_USER_FILE"
-      else
-        printf '[User]\nXSession=%s\n' "${XORG_SESSION:-ubuntu}" > "$ACCOUNTS_USER_FILE"
-      fi
-
-      apt_install_retry x11vnc || true
-
-      # Determine VNC password: use --vnc-password, else existing seed, else existing system pass, else generate
-      VNC_PASS8="${VNC_PASSWORD:-}"
-      if [ -z "$VNC_PASS8" ] && [ -s "$HOME_DIR/.config/gnome-remote-desktop.vncpass" ]; then
-        VNC_PASS8=$(head -n1 "$HOME_DIR/.config/gnome-remote-desktop.vncpass")
-      fi
-      if [ -n "$VNC_PASS8" ]; then
-        VNC_PASS8=$(printf '%s' "$VNC_PASS8" | LC_ALL=C tr -cd '[:print:]' | cut -b 1-8)
-      fi
-      if [ -z "$VNC_PASS8" ] && [ -f /etc/x11vnc.pass ]; then
-        : # leave existing password file in place
-      else
-        if [ -z "$VNC_PASS8" ]; then
-          VNC_PASS8=$(head -c 16 /dev/urandom | tr -cd 'A-Za-z0-9' | cut -c1-8)
-          log " - Generated VNC password: ${VNC_PASS8} (stored to /etc/x11vnc.pass)"
-          echo "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt"; chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" || true
-        fi
-        # Store the VNC password hash deterministically (avoid stdin/verify pitfalls)
-        x11vnc -storepasswd "$VNC_PASS8" /etc/x11vnc.pass >/dev/null 2>&1 || true
-        # Record the effective 8-char VNC password for reference (insecure; stored in user config)
-        printf '%s\n' "$VNC_PASS8" > "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
-        chown "$USERNAME":"$USERNAME" "$HOME_DIR/.config/vnc-password.txt" 2>/dev/null || true
-      fi
-      chmod 600 /etc/x11vnc.pass && chown root:root /etc/x11vnc.pass
-
-      # Create a wrapper that discovers the active user DISPLAY dynamically
-      cat >/usr/local/sbin/x11vnc-wrapper.sh <<'EOF'
+  # Create a wrapper that discovers the active user DISPLAY dynamically.
+  cat >/usr/local/sbin/x11vnc-wrapper.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 VNC_PASS_FILE="/etc/x11vnc.pass"
@@ -1035,12 +754,12 @@ exec /usr/bin/x11vnc \
   -rfbauth "$VNC_PASS_FILE" -rfbport 5900 -shared \
   -o "$LOG_FILE"
 EOF
-      # Inject the preferred user into the wrapper to avoid attaching to gdm
-      sed -i -E "s#__PREFERRED_USER__#${USERNAME}#" /usr/local/sbin/x11vnc-wrapper.sh
-      chmod 0755 /usr/local/sbin/x11vnc-wrapper.sh
+  # Inject the preferred user into the wrapper to avoid attaching to gdm.
+  sed -i -E "s#__PREFERRED_USER__#${USERNAME}#" /usr/local/sbin/x11vnc-wrapper.sh
+  chmod 0755 /usr/local/sbin/x11vnc-wrapper.sh
 
-      # Systemd unit using the wrapper
-      cat >/etc/systemd/system/x11vnc.service <<'EOF'
+  # Systemd unit using the wrapper.
+  cat >/etc/systemd/system/x11vnc.service <<'EOF'
 [Unit]
 Description=Legacy VNC server for X11 (x11vnc)
 Requires=display-manager.service
@@ -1056,14 +775,13 @@ RestartSec=2
 WantedBy=graphical.target
 EOF
 
-      systemctl daemon-reload
-      systemctl enable --now x11vnc.service || true
+  systemctl daemon-reload
+  systemctl enable --now x11vnc.service || true
 
-      # Stop GNOME Remote Desktop to avoid port conflict
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
-      sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
-      log " - Set GDM to Xorg (WaylandEnable=false) and selected Xorg session. Reboot or log out/in to apply."
-    fi
+  # Stop GNOME Remote Desktop to avoid port conflict.
+  sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop.service 2>/dev/null || true
+  sudo -u "$USERNAME" env "${USER_ENV[@]}" systemctl --user disable --now gnome-remote-desktop-headless.service 2>/dev/null || true
+  log " - Set GDM to Xorg (WaylandEnable=false) and selected Xorg session. Reboot or log out/in to apply."
 
   # Open firewall for VNC (guard against duplicates)
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -1072,12 +790,12 @@ EOF
     fi
   fi
 else
-  log "13) VNC: no changes (run with --vnc-password=... to modify VNC settings)"
+  step "VNC: no changes (run with --vnc-password=... to modify VNC settings)"
 fi
 
 ######################################################################################
 
-log "14) Rename device (hostname) if requested"
+step "Rename device (hostname) if requested"
 if [ -n "${NEW_HOSTNAME:-}" ]; then
   # Validate hostname (RFC 1123 label rules: letters/digits/hyphen; max 63 per label)
   if ! echo "$NEW_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'; then
@@ -1106,7 +824,7 @@ fi
 
 ######################################################################################
 
-log "15) Disable zram (nvzramconfig)"
+step "Disable zram (nvzramconfig)"
 if systemctl is-enabled nvzramconfig >/dev/null 2>&1; then
   systemctl disable nvzramconfig || true
   systemctl stop nvzramconfig || true
@@ -1117,7 +835,7 @@ fi
 
 ######################################################################################
 
-log "16) Install jetson-stats (jtop) via fix_jetson_stats.py"
+step "Install jetson-stats (jtop) via fix_jetson_stats.py"
 JTOP_FIX_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fix_jetson_stats.py"
 if [ -f "$JTOP_FIX_SCRIPT" ]; then
   if ! python3 "$JTOP_FIX_SCRIPT" --user "$USERNAME"; then
@@ -1129,8 +847,8 @@ fi
 
 ######################################################################################
 
-log "17) Configure swapfile (auto-default 8G/16G; disabled on Thor)"
-if [ "${L4T_MAJOR:-0}" -ge 38 ]; then
+step "Configure swapfile (auto-default 8G/16G; disabled on Thor)"
+if [ "${IS_THOR:-0}" -eq 1 ]; then
   log " - Thor detected; removing /swapfile and disabling swap at boot"
   swapoff /swapfile 2>/dev/null || true
   rm -f /swapfile || true
@@ -1185,7 +903,7 @@ fi
 
 ######################################################################################
 
-log "18) Repair Git & Git LFS permissions for all repos under $HOME_DIR"
+step "Repair Git & Git LFS permissions for all repos under $HOME_DIR"
 # Ensure user's global LFS hooks/config are installed (per-user), independent of repo
 if command -v git >/dev/null 2>&1; then
   sudo -u "$USERNAME" git lfs install --skip-repo >/dev/null 2>&1 || true
@@ -1213,14 +931,8 @@ fi
 
 ######################################################################################
 
-log "19) Set Jetson power mode (Thor=1/120W, others=MAXN)"
+step "Set Jetson power mode (Thor=1/120W, others=MAXN)"
 if command -v nvpmodel >/dev/null 2>&1; then
-  MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
-  IS_ORIN_NX_OR_NANO=0
-  echo "$MODEL" | grep -Eiq 'Orin[[:space:]-]*(NX|Nano)' && IS_ORIN_NX_OR_NANO=1
-  IS_THOR=0
-  echo "$MODEL" | grep -Eiq 'Thor' && IS_THOR=1
-
   if [ "$IS_THOR" -eq 1 ] && [ "$IS_ORIN_NX_OR_NANO" -eq 0 ]; then
     # Jetson AGX Thor: always set mode 1 (120W)
     if timeout 5s nvpmodel -m 1 >/dev/null 2>&1; then
@@ -1232,11 +944,11 @@ if command -v nvpmodel >/dev/null 2>&1; then
       log " - WARNING: failed to set nvpmodel mode 1 on Thor"
     fi
   else
-    # Orin NX/Nano and others on L4T 36.x: try to select MAXN profile
+    # Orin NX/Nano and other Jetson devices: try to select the highest MAXN profile.
     if timeout 5s nvpmodel -q 2>/dev/null | grep -qi 'MAXN'; then
       log " - Power mode already MAXN; skipping."
     else
-      # Commonly MAXN is mode 0 on Orin NX/Nano
+      # Commonly MAXN/MAXN_SUPER is mode 0 on Orin NX/Nano.
       if timeout 5s nvpmodel -m 0 >/dev/null 2>&1; then
         sleep 1
       fi
@@ -1267,7 +979,7 @@ fi
 
 ######################################################################################
 
-log "20) Install Docker Engine and plugins (if missing)"
+step "Install Docker Engine and plugins (if missing)"
 if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y ca-certificates curl gnupg
   install -m 0755 -d /etc/apt/keyrings
@@ -1300,7 +1012,7 @@ fi
 
 ######################################################################################
 
-log "21) Configure Docker default runtime to NVIDIA"
+step "Configure Docker default runtime to NVIDIA"
 DAEMON_JSON=/etc/docker/daemon.json
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update -y && apt-get install -y python3 || true
@@ -1352,7 +1064,7 @@ fi
 
 ######################################################################################
 
-log "22) Ensure $USERNAME is in 'docker' group"
+step "Ensure $USERNAME is in 'docker' group"
 if ! getent group docker >/dev/null; then
   groupadd docker || true
 fi
@@ -1365,25 +1077,7 @@ fi
 
 ######################################################################################
 
-log "23) Force snapd 2.68.5 (rev 24724) and hold (conditional)"
-# Parse L4T version from /etc/nv_tegra_release as MAJOR.MINOR.PATCH (e.g., 36.4.4 or 38.2.0)
-# L4T_VER="$(awk 'BEGIN{maj="";rev=""} /^# R[0-9]/{maj=$2;gsub(/[^0-9]/,"",maj); if(match($0,/REVISION:[[:space:]]*([0-9]+(\.[0-9]+)*)/,m)){rev=m[1]} print maj"."rev; exit }' /etc/nv_tegra_release 2>/dev/null || true)"
-# if printf '%s' "$L4T_VER" | grep -qE '^38\.'; then
-#   log " - Detected L4T $L4T_VER (38.x): skipping snapd pin/hold"
-# elif [ "$L4T_VER" = "36.4.4" ]; then
-#   log " - Detected L4T 36.4.4: forcing snapd 2.68.5 and holding"
-#   snap download snapd --revision=24724 || true
-#   snap ack snapd_24724.assert 2>/dev/null || true
-#   snap install snapd_24724.snap || true
-#   snap refresh --hold snapd || true
-#   rm -f snapd_24724.assert snapd_24724.snap || true
-# else
-#   log " - L4T version '${L4T_VER:-unknown}' not explicitly handled; not pinning snapd"
-# fi
-
-######################################################################################
-
-log "24) Remove preinstalled games (apt & snap)"
+step "Remove preinstalled games (apt & snap)"
 
 # APT packages commonly pulled in by Ubuntu/Jetson images
 # (GNOME games, see: aisleriot, gnome-mines, gnome-mahjongg, gnome-sudoku, gnome-chess,
@@ -1445,7 +1139,7 @@ fi
 
 ######################################################################################
 
-log "25) Install MicroK8s (snap) [optional]"
+step "Install MicroK8s (snap) [optional]"
 if [ "${MICROK8S}" -eq 1 ]; then
   if command -v snap >/dev/null 2>&1; then
     if snap list microk8s >/dev/null 2>&1; then
@@ -1490,8 +1184,8 @@ fi
 
 ######################################################################################
 
-# --- Step 26: Clone jetson-containers and run install.sh (only if missing) ---
-log "26) Clone jetson-containers and run install.sh (only if missing)"
+# Clone jetson-containers and run install.sh (only if missing)
+step "Clone jetson-containers and run install.sh (only if missing)"
 # Ensure git is available
 if ! command -v git >/dev/null 2>&1; then
   apt-get install -y git
@@ -1514,8 +1208,8 @@ fi
 
 ######################################################################################
 
-# --- Step 27: Install K3s [optional] ---
-log "27) Install K3s [optional]"
+# Install K3s [optional]
+step "Install K3s [optional]"
 if [ "${K3S}" -eq 1 ]; then
   # Disable IPv6 at runtime (as requested)
   sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
@@ -1601,9 +1295,8 @@ fi
 
 ######################################################################################
 
-# --- Step 28: Install Helm (Kubernetes package manager) [optional, only if K3s is installed] ---
+step "Install Helm (Kubernetes package manager) [optional]"
 if [ "${K3S}" -eq 1 ]; then
-  log "28) Install Helm (Kubernetes package manager)"
   if command -v helm >/dev/null 2>&1; then
     log " - Helm already installed; skipping."
   else
@@ -1615,62 +1308,24 @@ if [ "${K3S}" -eq 1 ]; then
     apt-get update -y
     apt-get install -y helm
   fi
+else
+  log " - Skipping Helm install (requires --k3s)"
 fi
 
-# --- Step 29: Install guvcview ---
-log "29) Install guvcview"
+######################################################################################
+
+step "Install guvcview"
 apt-get install -y guvcview
 
 ######################################################################################
 
-# --- Step 30: Clean some system components ---
-# log "30) Clean some system components"
-# APT_PURGE=(
-#   gnome-software
-#   packagekit
-#   packagekit-tools
-#   update-notifier
-#   tracker3
-#   tracker3-miners
-#   gnome-online-accounts
-#   fwupd
-# )
-# log "Stopping services (best effort)…"
-# systemctl stop packagekit 2>/dev/null || true
-# systemctl stop fwupd 2>/dev/null || true
-# TRACKER_CACHE="${HOME}/.cache/tracker3"
-# if [ -d "$TRACKER_CACHE" ]; then
-#   log "Removing user Tracker cache at $TRACKER_CACHE"
-#   rm -rf "$TRACKER_CACHE" || true
-# fi
-# log "Purging desktop background-updaters & indexers…"
-# TO_PURGE=()
-# for p in "${APT_PURGE[@]}"; do
-#   dpkg -s "$p" >/dev/null 2>&1 && TO_PURGE+=("$p")
-# done
-# if [ "${#TO_PURGE[@]}" -gt 0 ]; then
-#   apt-get update -y
-#   DEBIAN_FRONTEND=noninteractive apt-get purge -y "${TO_PURGE[@]}"
-# else
-#   log "Nothing from main list is installed; skipping."
-# fi
-# log "Autoremove any orphaned deps…"
-# DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
-# apt-get clean
-# log "Masking leftover services if any…"
-# systemctl mask packagekit.service 2>/dev/null || true
-# systemctl mask fwupd.service 2>/dev/null || true
-
-######################################################################################
-
-# --- Step 31: Configure local registry (optional via REG IP) ---
-log "31) Configure local registry (optional)"
+step "Configure local registry (optional)"
 if [ -n "${REG_IP:-}" ]; then
   # Basic IPv4 sanity check (do not hard fail if mismatched)
   if echo "$REG_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
     log " - Using registry IP: $REG_IP"
 
-    # 31.1) Add/replace registry.local in /etc/hosts
+    # Add/replace registry.local in /etc/hosts
     if [ -f /etc/hosts ]; then
       cp /etc/hosts "/etc/hosts.bak.$(date +%s)" || true
       awk 'index($0,"registry.local")==0' /etc/hosts > /etc/hosts.tmp && \
@@ -1681,7 +1336,7 @@ if [ -n "${REG_IP:-}" ]; then
     fi
     log " - Mapped registry.local to $REG_IP in /etc/hosts"
 
-    # 31.2) Install domain.crt for Docker registry.local on ports 5001/5002/5555
+    # Install domain.crt for Docker registry.local on the expected registry ports.
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     CERT_SRC="$SCRIPT_DIR/domain.crt"
     if [ -f "$CERT_SRC" ]; then
@@ -1705,7 +1360,7 @@ if [ -n "${REG_IP:-}" ]; then
       log " - WARNING: domain.crt not found at $CERT_SRC; skipping cert installation"
     fi
 
-    # 31.2.1) Add the registry CA to the OS trust store (Ubuntu) if not already there
+    # Add the registry CA to the OS trust store (Ubuntu) if not already there.
     ca_src=""
     if [ -f "$CERT_SRC" ]; then
       ca_src="$CERT_SRC"
@@ -1740,7 +1395,7 @@ if [ -n "${REG_IP:-}" ]; then
       log " - WARNING: no registry CA cert available to add to OS trust store"
     fi
 
-    # 31.3) Ensure Docker daemon.json has registry mirrors
+    # Ensure Docker daemon.json has registry mirrors.
     DAEMON_JSON=/etc/docker/daemon.json
     if ! command -v python3 >/dev/null 2>&1; then
       apt-get update -y && apt-get install -y python3 || true
@@ -1785,7 +1440,7 @@ fi
 
 ######################################################################################
 
-log "32) Install NVM + Node LTS + OpenAI Codex CLI"
+step "Install NVM + Node LTS + OpenAI Codex CLI"
 sudo -u "$USERNAME" bash -lc '
 set -e
 export NVM_DIR="$HOME/.nvm"
@@ -1809,7 +1464,7 @@ npm -v || true
 
 ######################################################################################
 
-log "33) Configure Git identity (optional)"
+step "Configure Git identity (optional)"
 if [ -n "${GIT_USER:-}" ] || [ -n "${GIT_EMAIL:-}" ]; then
   if ! command -v git >/dev/null 2>&1; then
     log " - git not installed; skipping identity configuration"
@@ -1826,7 +1481,7 @@ fi
 
 ######################################################################################
 
-log "34) Install btop (system monitor)"
+step "Install btop (system monitor)"
 if command -v btop >/dev/null 2>&1; then
   log " - btop already installed; skipping."
 else
