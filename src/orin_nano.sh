@@ -2,7 +2,7 @@
 
 # Steps:
 # 1. Validate the required default user, password, and hostname arguments.
-# 2. Resolve the JetPack 7.2 Orin Nano `Linux_for_Tegra` directory and target rootfs.
+# 2. Resolve the JetPack 7.2.1 Orin Nano `Linux_for_Tegra` directory and target rootfs.
 # 3. Apply NVIDIA binaries and run flash prerequisites in the JetPack workspace.
 # 4. Pre-create the default user account and hostname in the target image.
 # 5. Optionally inject a Wi-Fi profile into the target rootfs.
@@ -85,8 +85,26 @@ escape_nm_value() {
   printf '%s' "$value"
 }
 
+resolve_host_home() {
+  local user_home=""
+
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  fi
+
+  if [[ -z "$user_home" ]]; then
+    user_home="$HOME"
+  fi
+
+  printf '%s' "$user_home"
+}
+
 WIFI_PROFILE_ENABLED=0
 if [[ -n "$WIFI_PSK" ]]; then
+  if [[ "$WIFI_PSK" == *$'\n'* ]]; then
+    echo "Wi-Fi password contains a newline. Pass --wifi-psk as a single-line value." >&2
+    exit 1
+  fi
   if [[ -z "$WIFI_SSID" ]]; then
     WIFI_SSID="$(detect_host_wifi_ssid)"
   fi
@@ -101,8 +119,9 @@ elif [[ -n "$WIFI_SSID" ]]; then
   exit 1
 fi
 
-JETPACK_VERSION="${JETPACK_VERSION:-7.2}"
-export JETPACK="${JETPACK:-$HOME/nvidia/nvidia_sdk/JetPack_${JETPACK_VERSION}_Linux_JETSON_ORIN_NANO_TARGETS/Linux_for_Tegra}"
+JETPACK_VERSION="${JETPACK_VERSION:-7.2.1}"
+HOST_HOME="${HOST_HOME:-$(resolve_host_home)}"
+export JETPACK="${JETPACK:-$HOST_HOME/nvidia/nvidia_sdk/JetPack_${JETPACK_VERSION}_Linux_JETSON_ORIN_NANO_TARGETS/Linux_for_Tegra}"
 ROOTFS="$JETPACK/rootfs"
 USER_HOME_DIR="$ROOTFS/home/$USER_NAME"
 
