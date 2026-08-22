@@ -1,0 +1,2 @@
+chmod 600 /home/jetson/.ssh/qnap_backup_thor
+chmod 600 /home/jetson/.ssh/qnap_backup_orin
