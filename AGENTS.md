@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+Shared infrastructure: [rules](../infrastructure/AGENTS.md) and
+[Jetson reference note](../infrastructure/Jetson.md). Historical setup examples
+do not establish current device ownership or service readiness.
+
 ## Project Structure & Module Organization
 - Root docs: `README.md`, `Installation.md`, `ROS.md`, `JetsonContainers.md`, `Registry.md`, `K3s.md`.
 - Scripts: `src/` contains Bash utilities for setup and flashing (e.g., `start.sh`, `orin_nano.sh`, `orin_nx.sh`) and a K3s test manifest `test_k3s.yaml`.
@@ -33,4 +37,3 @@
 - VNC: `start.sh` can set a VNC password; avoid weak 8‑char defaults in production; consider enabling encryption.
 - Keyring: `start.sh` may create an unencrypted keyring for non-interactive setups—review policy for your environment.
 - Docker/Registry: manage certificates and mirrors as in `Registry.md`; do not commit secrets.
-
