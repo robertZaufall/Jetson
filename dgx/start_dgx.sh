@@ -426,26 +426,85 @@ fi
 ######################################################################################
 
 log "10) Install NVM + Node LTS + OpenAI Codex CLI"
-sudo -u "$USERNAME" bash -lc '
-set -e
+# Repair only root-owned files in this user's Node/npm installation and cache.
+node_group="$(id -gn "$USERNAME")"
+for node_path in "$HOME_DIR/.nvm" "$HOME_DIR/.npm" "$HOME_DIR/.npmrc"; do
+  if [ -e "$node_path" ] || [ -L "$node_path" ]; then
+    find -P "$node_path" -user root -exec chown -h "$USERNAME:$node_group" {} +
+  fi
+done
+
+sudo -H -u "$USERNAME" env HOME="$HOME_DIR" bash --noprofile --norc <<'NODE_SETUP'
+set -eo pipefail
+cd "$HOME"
 export NVM_DIR="$HOME/.nvm"
+unset PREFIX NPM_CONFIG_PREFIX npm_config_prefix NPM_CONFIG_GLOBALCONFIG npm_config_globalconfig
+unset NPM_CONFIG_USERCONFIG npm_config_userconfig NPM_CONFIG_CACHE npm_config_cache
+
+# NVM manages the global prefix. Preserve other npm settings (including registry/auth).
+python3 - <<'PY_NPMRC'
+from pathlib import Path
+import re
+import shutil
+
+path = Path.home() / ".npmrc"
+if path.is_file():
+    original = path.read_text()
+    cleaned = "".join(line for line in original.splitlines(keepends=True)
+                      if not re.match(r"^\s*(prefix|globalconfig)\s*=", line, re.I))
+    if cleaned != original:
+        backup = path.with_name(".npmrc.before-nvm")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+            backup.chmod(0o600)
+        path.write_text(cleaned)
+        print(" - Removed npm prefix/globalconfig overrides; backup: ~/.npmrc.before-nvm")
+PY_NPMRC
+
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   echo " - Installing nvm to $NVM_DIR"
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash
 fi
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-# Ensure LTS Node is present and default
+. "$NVM_DIR/nvm.sh" --no-use
 nvm install --lts
-nvm alias default "lts/*" || true
-nvm use --lts
-# Install Codex CLI only if missing
+nvm alias default "lts/*"
+nvm use default
+
+# Load NVM in interactive Bash/Zsh and the login profile Bash actually reads.
+login_profile="$HOME/.profile"
+for candidate in "$HOME/.bash_profile" "$HOME/.bash_login"; do
+  if [ -f "$candidate" ]; then
+    login_profile="$candidate"
+    break
+  fi
+done
+for profile in "$HOME/.bashrc" "$login_profile" "$HOME/.zshrc"; do
+  if ! grep -Fq '# DGX setup: load user-owned Node.js through NVM' "$profile" 2>/dev/null; then
+    cat >> "$profile" <<'NVM_PROFILE'
+
+# DGX setup: load user-owned Node.js through NVM
+export NVM_DIR="$HOME/.nvm"
+[ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh"
+NVM_PROFILE
+  fi
+done
+
+npm_prefix="$(npm prefix -g)"
+nvm_real_dir="$(cd "$NVM_DIR" && pwd -P)"
+case "$npm_prefix" in
+  "$nvm_real_dir"/versions/node/*) ;;
+  *) echo "ERROR: npm global prefix is outside NVM: $npm_prefix" >&2; exit 1 ;;
+esac
+[ -w "$npm_prefix" ] || { echo "ERROR: npm global prefix is not writable: $npm_prefix" >&2; exit 1; }
 if ! npm list -g @openai/codex >/dev/null 2>&1; then
-  npm i -g @openai/codex
+  npm install -g @openai/codex
 fi
-# Show versions for verification
-node -v || true
-npm -v || true
-'
+node --version
+npm --version
+codex --version
+printf ' - Node: %s\n - npm: %s\n - Global packages: %s\n' "$(command -v node)" "$(command -v npm)" "$npm_prefix"
+NODE_SETUP
+log " - Open a new terminal before using npm; install global packages without sudo."
 
 ######################################################################################
 
@@ -768,6 +827,11 @@ EOF
   fi
 }
 ensure_latest_wifi_autoconnect
+
+######################################################################################
+
+log "15) Cap GPU graphics clock at 2200 MHz"
+sudo nvidia-smi -lgc 0,2200
 
 ######################################################################################
 
